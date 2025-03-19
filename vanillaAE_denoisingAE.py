@@ -194,49 +194,51 @@ class VanillaAutoencoder(nn.Module):
         encoded = self.encoder(x)
         decoded = self.decoder(encoded)
         return decoded
-    
+
 vanilla_autoencoder = VanillaAutoencoder(latent_dim)
 
 # Move the model to GPU if available
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 vanilla_autoencoder.to(device)
 
-summary(vanilla_autoencoder, input_size=(3, 128, 128)) 
+summary(vanilla_autoencoder, input_size=(3, 128, 128))
 
-class AutoencoderLightningModule(L.LightningModule):
-    def __init__(self, latent_dim):
-        super(AutoencoderLightningModule, self).__init__()
-        self.autoencoder = VanillaAutoencoder(latent_dim)
-        self.criterion = nn.MSELoss()
+# Define the optimizer and loss function
+criterion = nn.MSELoss()
+optimizer = optim.Adam(vanilla_autoencoder.parameters(), lr=0.001)
 
-    def forward(self, x):
-        return self.autoencoder(x)
+# Training loop
+num_epochs = 50
+for epoch in range(num_epochs):  
+    vanilla_autoencoder.train()
+    total_loss = 0  # Track total loss for monitoring
 
-    def training_step(self, batch, batch_idx):
-        img, _ = batch
-        output = self.autoencoder(img)
-        loss = self.criterion(output, img)
-        self.log('train_loss', loss)
-        return loss
+    # Use tqdm to add a progress bar to the training
+    with tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}", unit="batch") as tepoch:
+        for img, _ in tepoch:
+            img = img.to(device).float()  # Ensure images are float
+            
+            optimizer.zero_grad()
+            output = vanilla_autoencoder(img)
+            loss = criterion(output, img)
+            loss.backward()
+            optimizer.step()
 
-    def configure_optimizers(self):
-        return optim.Adam(self.autoencoder.parameters(), lr=0.001)
+            total_loss += loss.item()  # Accumulate batch loss
 
-# Define model
-vanilla_autoencoder = AutoencoderLightningModule(latent_dim)
+            # Update progress bar with the loss value
+            tepoch.set_postfix(loss=loss.item())
 
-logger = TensorBoardLogger("lightning_logs", name="vanilla_autoencoder")
-
-# Train Vanilla Autoencoder using Lightning
-trainer = L.Trainer(max_epochs=20, devices=1, accelerator='gpu', logger=logger)
-trainer.fit(vanilla_autoencoder, train_loader)
+    # Average loss per epoch
+    avg_loss = total_loss / len(train_loader)  # Compute average loss
+    print(f'Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.6f}')
 
 # Save the trained model after training
 torch.save(vanilla_autoencoder.state_dict(), 'vanilla_autoencoder.pth')
 print("Model saved.")
 
 # Load the trained model in a new session
-vanilla_autoencoder = AutoencoderLightningModule(latent_dim).to(device) # Initialize a new instance of the model
+vanilla_autoencoder = VanillaAutoencoder(latent_dim).to(device) # Initialize a new instance of the model
 vanilla_autoencoder.load_state_dict(torch.load('vanilla_autoencoder.pth')) # Load the saved model weights
 vanilla_autoencoder.eval()  # Important: Set the model to evaluation mode
 print("Model loaded and ready to use.")
@@ -274,59 +276,6 @@ def compare_real_and_reconstructed(loader, model, index=1):
 # Compare one real image with the reconstructed image
 compare_real_and_reconstructed(test_loader, vanilla_autoencoder)
 
-# def calculate_anomaly_score(model, loader):
-#     model.eval()
-#     scores = []
-#     with torch.no_grad():
-#         for img, _ in loader:
-#             img = img.to(device)
-#             output = model(img)
-#             loss = nn.functional.mse_loss(output, img, reduction='none')
-#             loss = loss.view(loss.size(0), -1).mean(dim=1)
-#             scores.append(loss.cpu().numpy())
-#     return np.concatenate(scores)
-
-# def evaluate_anomaly_detection(model, real_loader, anomaly_loader):
-#     real_scores = calculate_anomaly_score(model, real_loader)
-#     anomaly_scores = calculate_anomaly_score(model, anomaly_loader)
-#     y_true = np.concatenate([np.zeros_like(real_scores), np.ones_like(anomaly_scores)])
-#     y_scores = np.concatenate([real_scores, anomaly_scores])
-#     fpr, tpr, _ = roc_curve(y_true, y_scores)
-#     roc_auc = auc(fpr, tpr)
-#     return roc_auc
-
-# real_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
-# anomaly_loader = DataLoader(train_dataset, batch_size=64, shuffle=False)
-
-# roc_auc = evaluate_anomaly_detection(model, real_loader, anomaly_loader)
-# print(f'ROC AUC for anomaly detection: {roc_auc}')def calculate_anomaly_score(model, loader):
-#     model.eval()
-#     scores = []
-#     with torch.no_grad():
-#         for img, _ in loader:
-#             img = img.to(device)
-#             output = model(img)
-#             loss = nn.functional.mse_loss(output, img, reduction='none')
-#             loss = loss.view(loss.size(0), -1).mean(dim=1)
-#             scores.append(loss.cpu().numpy())
-#     return np.concatenate(scores)
-
-# def evaluate_anomaly_detection(model, real_loader, anomaly_loader):
-#     real_scores = calculate_anomaly_score(model, real_loader)
-#     anomaly_scores = calculate_anomaly_score(model, anomaly_loader)
-#     y_true = np.concatenate([np.zeros_like(real_scores), np.ones_like(anomaly_scores)])
-#     y_scores = np.concatenate([real_scores, anomaly_scores])
-#     fpr, tpr, _ = roc_curve(y_true, y_scores)
-#     roc_auc = auc(fpr, tpr)
-#     return roc_auc
-
-# real_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
-# anomaly_loader = DataLoader(train_dataset, batch_size=64, shuffle=False)
-
-# roc_auc = evaluate_anomaly_detection(model, real_loader, anomaly_loader)
-# print(f'ROC AUC for anomaly detection: {roc_auc}')
-
-
 # Function to add noise to images
 # This function adds Gaussian noise to the input images.
 # The noise level is controlled by the standard deviation of the Gaussian distribution.
@@ -335,30 +284,35 @@ def add_noise(img):
     img_noisy = torch.clamp(img + noise, 0., 1.)
     return img_noisy
 
-# Train Denoising Autoencoder using Lightning
-class DenoisingAutoencoderLightningModule(AutoencoderLightningModule):
-    def training_step(self, batch, batch_idx):
+denoising_autoencoder = VanillaAutoencoder(latent_dim).to(device)
+optimizer = optim.Adam(denoising_autoencoder.parameters(), lr=0.001)
+
+# Training loop for denoising autoencoder
+for epoch in range(num_epochs):
+    denoising_autoencoder.train()
+    running_loss = 0.0
+    for batch in train_loader:
         img, _ = batch
+        img = img.to(device)
         img_noisy = add_noise(img)
-        output = self.autoencoder(img_noisy)
-        loss = self.criterion(output, img)
-        self.log('train_loss', loss)
-        return loss
-
-# Define denoising model
-denoising_model = DenoisingAutoencoderLightningModule(latent_dim)
-
-# Train Denoising Autoencoder using Lightning
-trainer = L.Trainer(max_epochs=20, gpus=1 if torch.cuda.is_available() else 0)
-trainer.fit(denoising_model, train_loader)
+        
+        optimizer.zero_grad()
+        output = denoising_autoencoder(img_noisy)
+        loss = criterion(output, img)
+        loss.backward()
+        optimizer.step()
+        
+        running_loss += loss.item()
+    
+    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {running_loss/len(train_loader)}')
 
 # Save the trained denoising autoencoder model after training
-trainer.save_checkpoint('denoising_autoencoder.ckpt')
+torch.save(denoising_autoencoder.state_dict(), 'denoising_autoencoder.pth')
 print("Denoising Autoencoder model saved.")
 
 # Load the trained denoising autoencoder model for testing
-denoising_model = DenoisingAutoencoderLightningModule.load_from_checkpoint('denoising_autoencoder.ckpt')
-denoising_model.eval()
+denoising_autoencoder.load_state_dict(torch.load('denoising_autoencoder.pth'))
+denoising_autoencoder.eval()
 print("Denoising Autoencoder model loaded and ready to use.")
 
 # Function to show original and reconstructed images
@@ -385,5 +339,5 @@ def show_images(loader, model):
             plt.show()
             break
 
-show_images(test_loader, denoising_model)
+show_images(test_loader, denoising_autoencoder)
 summary(vanilla_autoencoder, input_size=(3, 128, 128))
