@@ -6,6 +6,8 @@
 
 <p align="center">Developed by <a href="https://www.linkedin.com/in/juancarlosgarzon/">Juan Carlos Garzon</a>, <a href="https://www.linkedin.com/in/vivialves-developer/">Viviane Alves</a> </p>
 
+<br>
+
 <div align="center">
   
 [![GitHub](https://badges.aleen42.com/src/github.svg)](https://github.com/Juank0621)
