@@ -6,9 +6,16 @@
 
 <p align="center">Developed by <a href="https://www.linkedin.com/in/juancarlosgarzon/">Juan Carlos Garzon</a>, <a href="https://www.linkedin.com/in/vivialves-developer/">Viviane Alves</a> </p>
 
-[![GitHub](https://badges.aleen42.com/src/github.svg)](https://github.com/Juank0621)
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-Profile-blue?logo=linkedin)](https://www.linkedin.com/in/juancarlosgarzon)
-![Python](https://badges.aleen42.com/src/python.svg)
+<p align="center">
+  <a href="https://github.com/Juank0621">
+    <img src="https://badges.aleen42.com/src/github.svg" alt="GitHub"/>
+  </a>
+  <a href="https://www.linkedin.com/in/juancarlosgarzon">
+    <img src="https://img.shields.io/badge/LinkedIn-Profile-blue?logo=linkedin" alt="LinkedIn"/>
+  </a>
+  <img src="https://badges.aleen42.com/src/python.svg" alt="Python"/>
+</p>
+
 ---
 
 <p align="center">
