@@ -6,13 +6,14 @@
 
 <p align="center">Developed by <a href="https://www.linkedin.com/in/juancarlosgarzon/">Juan Carlos Garzon</a>, <a href="https://www.linkedin.com/in/vivialves-developer/">Viviane Alves</a> </p>
 
-
+<div align="center">
+  
 [![GitHub](https://badges.aleen42.com/src/github.svg)](https://github.com/Juank0621)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Profile-blue?logo=linkedin)](https://www.linkedin.com/in/juancarlosgarzon)
 ![Python](https://badges.aleen42.com/src/python.svg)
-[![license](https://img.shields.io/pypi/l/supervision)](https://github.com/Juank0621/CIFAR10_GenerativeAI/LICENCE)
+[![license](https://img.shields.io/pypi/l/supervision)](https://github.com/Juank0621/CIFAR10_GenerativeAI/blob/main/LICENSE)
 
-
+</div>
 ---
 
 <p align="center">
