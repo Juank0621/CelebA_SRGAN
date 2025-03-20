@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="images/personal_logo.png" alt="Logo" style="width:60%;"/>
+  <img src="images/personal_logo.png" alt="Logo" style="width:80%;"/>
 </p>
 
 <h1 align="center">Generative AI + Anomaly Detection on CIFAR-10</h1>
