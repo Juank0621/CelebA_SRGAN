@@ -12,12 +12,12 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Load the model
 @st.cache_resource
-def load_model(class_name):
-    model_path = f'models/vanilla_autoencoder_class_{class_name}_weights.pth'
-    vanilla_autoencoder = VanillaAutoencoder(latent_dim).to(device)
-    vanilla_autoencoder.load_state_dict(torch.load(model_path))
-    vanilla_autoencoder.eval()
-    return vanilla_autoencoder
+def load_model(model_type, class_name):
+    model_path = f'models/{model_type}/{model_type}_class_{class_name}_weights.pth'
+    autoencoder = VanillaAutoencoder(latent_dim).to(device)
+    autoencoder.load_state_dict(torch.load(model_path))
+    autoencoder.eval()
+    return autoencoder
 
 # Main Streamlit app function
 def main():
@@ -25,6 +25,12 @@ def main():
     st.title("🧒🏻 Deep Unsupervised Learning - Final Project 👧🏼")
     st.subheader("🚀 Juan Carlos Garzon - Viviane Alves 🚀")
     st.sidebar.title("📸 Upload Files")
+
+    # Dropdown to select the model type
+    model_types = ['vanilla_autoencoder', 'denoising_autoencoder']
+    model_display_names = [model_type.replace('_', ' ') for model_type in model_types]
+    selected_model_display_name = st.sidebar.selectbox("Select Model Type", model_display_names)
+    selected_model_type = model_types[model_display_names.index(selected_model_display_name)]
 
     # Dropdown to select the class model
     class_names = ['Airplane', 'Automobile', 'Bird', 'Cat', 'Deer', 'Dog', 'Frog', 'Horse', 'Ship', 'Truck']
@@ -50,11 +56,11 @@ def main():
         input_tensor = preprocess(image).unsqueeze(0).to(device)
 
         # Load the model only once
-        vanilla_autoencoder = load_model(class_index)
+        autoencoder = load_model(selected_model_type, class_index)
 
         # Forward pass through the model
         with torch.no_grad():
-            reconstructed = vanilla_autoencoder(input_tensor).cpu().squeeze(0)
+            reconstructed = autoencoder(input_tensor).cpu().squeeze(0)
 
         # Display reconstructed image
         st.subheader("🖼️ Reconstructed Image")

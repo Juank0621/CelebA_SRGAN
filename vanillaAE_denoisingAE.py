@@ -319,7 +319,7 @@ def main():
         optimizer = optim.Adam(vanilla_autoencoder.parameters(), lr=0.0005)
 
         # Training loop
-        num_epochs = 3
+        num_epochs = 20
         train_losses = []
         val_losses = []
         for epoch in range(num_epochs):
@@ -362,16 +362,12 @@ def main():
             confusion_mat[real_class, i if i < real_class else i + 1] += np.sum(ano_preds == 0)
 
         # Save the model weights after training for each class
-        save_weights(vanilla_autoencoder, f'models/vanilla_autoencoder_class_{real_class}_weights.pth')
+        save_weights(vanilla_autoencoder, f'models/vanilla_autoencoder/vanilla_autoencoder_class_{real_class}_weights.pth')
 
     return confusion_mat, all_aurocs, all_thresholds, all_train_losses, all_val_losses
 
 # Call the main function and get results
 confusion_mat, all_aurocs, all_thresholds, all_train_losses, all_val_losses = main()
-
-# Display 5 original and reconstructed images from the test dataset
-test_loader = DataLoader(val_dataset, batch_size=1, shuffle=True)
-display_test_images(vanilla_autoencoder, test_loader)
 
 # Función para graficar las pérdidas
 def plot_losses(train_losses, val_losses, class_index):
@@ -408,45 +404,136 @@ def load_weights(model, path):
     model.load_state_dict(torch.load(path)) # Load the saved model weights
     model.eval()  # Important: Set the model to evaluation mode
 
-vanilla_autoencoder = VanillaAutoencoder(latent_dim).to(device)
-load_weights(vanilla_autoencoder, 'models/vanilla_autoencoder_weights.pth')
-print("Model loaded and ready to use.")
+# Function to display 5 original and reconstructed images from the test dataset
+def compare_images(test_loader):
+    images, reconstructed_images = [], []
+    for class_index in range(10):
+        # Load the model for the specific class
+        vanilla_autoencoder = VanillaAutoencoder(latent_dim).to(device)
+        load_weights(vanilla_autoencoder, f'models/vanilla_autoencoder/vanilla_autoencoder_class_{class_index}_weights.pth')
+        vanilla_autoencoder.eval()
+        
+        with torch.no_grad():
+            for i, (inputs, _) in enumerate(test_loader):
+                if i >= 5:
+                    break
+                inputs = inputs.to(device)
+                outputs = vanilla_autoencoder(inputs)
+                images.append(inputs.cpu().squeeze())
+                reconstructed_images.append(outputs.cpu().squeeze())
+
+    fig, axs = plt.subplots(5, 2, figsize=(10, 20))
+    for i in range(5):
+        axs[i, 0].imshow(images[i].permute(1, 2, 0).numpy())
+        axs[i, 0].set_title("Original")
+        axs[i, 0].axis("off")
+        axs[i, 1].imshow(reconstructed_images[i].permute(1, 2, 0).numpy())
+        axs[i, 1].set_title(f"Reconstructed (Class {i})")
+        axs[i, 1].axis("off")
+    plt.show()
+
+# Display 5 original and reconstructed images from the test dataset using different models for each class
+compare_images(test_loader)
 
 # Function to add noise to images
-# This function adds Gaussian noise to the input images.
-# The noise level is controlled by the standard deviation of the Gaussian distribution.
 def add_noise(img):
     noise = torch.randn_like(img) * 0.1
     img_noisy = torch.clamp(img + noise, 0., 1.)
     return img_noisy
 
-denoising_autoencoder = VanillaAutoencoder(latent_dim).to(device)
-optimizer = optim.Adam(denoising_autoencoder.parameters(), lr=0.001)
-
-# Training loop for denoising autoencoder
-for epoch in range(num_epochs):
+# Function to train the denoising autoencoder for one epoch
+def train_denoising_epoch(denoising_autoencoder, train_loader, criterion, optimizer):
     denoising_autoencoder.train()
-    running_loss = 0.0
-    for batch in train_loader:
-        img, _ = batch
-        img = img.to(device)
-        img_noisy = add_noise(img)
-        
+    total_loss = 0
+    for inputs, _ in train_loader:
+        inputs = inputs.to(device)
+        inputs_noisy = add_noise(inputs)
         optimizer.zero_grad()
-        output = denoising_autoencoder(img_noisy)
-        loss = criterion(output, img)
+        outputs = denoising_autoencoder(inputs_noisy)
+        loss = criterion(outputs, inputs)
         loss.backward()
         optimizer.step()
-        
-        running_loss += loss.item()
+        total_loss += loss.item()
+    return total_loss / len(train_loader)
+
+# Main function to train and evaluate the denoising autoencoder model
+def main_denoising():
+    global device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {running_loss/len(train_loader)}')
+    # Initialize confusion matrix and lists to store results
+    confusion_mat = np.zeros((10, 10))
+    all_aurocs = []
+    all_thresholds = []
+    all_train_losses = []
+    all_val_losses = []
 
-# Save the trained denoising autoencoder model after training
-torch.save(denoising_autoencoder.state_dict(), 'models/denoising_autoencoder.pth')
-print("Denoising Autoencoder model saved.")
+    # Loop over each class as the real class
+    for real_class in range(10):
+        print(f'Training for real class: {real_class}')
 
-# Load the trained denoising autoencoder model for testing
-denoising_autoencoder.load_state_dict(torch.load('models/denoising_autoencoder.pth'))
-denoising_autoencoder.eval()
-print("Denoising Autoencoder model loaded and ready to use.")
+        # Load datasets
+        train_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=True, download=True)
+        val_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=False, download=True)
+
+        train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False)
+
+        real_test_loader = DataLoader(val_dataset, batch_size=128, shuffle=False)
+        ano_test_loaders = [DataLoader(OneClassDatasetCIFAR10(root_dir='data', real_class=i, transform=transform, train=False, download=True), batch_size=32, shuffle=False) for i in range(10) if i != real_class]
+
+        # Initialize model, criterion, and optimizer
+        denoising_autoencoder = VanillaAutoencoder(latent_dim).to(device)
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(denoising_autoencoder.parameters(), lr=0.0005)
+
+        # Training loop
+        num_epochs = 20
+        train_losses = []
+        val_losses = []
+        for epoch in range(num_epochs):
+            train_loss = train_denoising_epoch(denoising_autoencoder, train_loader, criterion, optimizer)
+            val_loss = evaluate_model(denoising_autoencoder, val_loader, criterion)
+            train_losses.append(train_loss)
+            val_losses.append(val_loss)
+            print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
+
+        # Store losses
+        all_train_losses.append(train_losses)
+        all_val_losses.append(val_losses)
+
+        # Calculate AUROC
+        auroc = test_model(denoising_autoencoder, real_test_loader, ano_test_loaders)
+        all_aurocs.append(auroc)
+        print(f'AUROC for class {real_class}: {auroc:.4f}')
+
+        # Select threshold
+        threshold = select_threshold(denoising_autoencoder, real_test_loader, ano_test_loaders[0])
+        all_thresholds.append(threshold)
+        print(f'Selected Threshold for class {real_class}: {threshold:.4f}')
+
+        # Update confusion matrix
+        def get_predictions(loader, threshold):
+            predictions = []
+            with torch.no_grad():
+                for inputs, _ in loader:
+                    inputs = inputs.to(device)
+                    outputs = denoising_autoencoder(inputs)
+                    mse_loss = F.mse_loss(outputs, inputs, reduction='none').mean(dim=[1, 2, 3])
+                    preds = (mse_loss < threshold).cpu().numpy()
+                    predictions.append(preds)
+            return np.concatenate(predictions)
+
+        real_preds = get_predictions(real_test_loader, threshold)
+        for i, ano_loader in enumerate(ano_test_loaders):
+            ano_preds = get_predictions(ano_loader, threshold)
+            confusion_mat[real_class, real_class] += np.sum(real_preds == 1)
+            confusion_mat[real_class, i if i < real_class else i + 1] += np.sum(ano_preds == 0)
+
+        # Save the model weights after training for each class
+        save_weights(denoising_autoencoder, f'models/denoising_autoencoder/denoising_autoencoder_class_{real_class}_weights.pth')
+
+    return confusion_mat, all_aurocs, all_thresholds, all_train_losses, all_val_losses
+
+# Call the main function for denoising autoencoder and get results
+confusion_mat, all_aurocs, all_thresholds, all_train_losses, all_val_losses = main_denoising()
