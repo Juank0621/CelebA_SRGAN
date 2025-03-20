@@ -113,15 +113,16 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Lightning logs
-lightning_logs/
-
 # Model checkpoints
 *.ckpt
 
 # Data directories
 data/
-lightning_logs/
+cifar10_test_images/
 
 # Comments files
 *.comments
+
+# Models directory
+# models/
+

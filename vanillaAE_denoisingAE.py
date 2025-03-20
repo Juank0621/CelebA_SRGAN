@@ -2,21 +2,23 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+import seaborn as sns
 from PIL import Image
-from tqdm import tqdm
+from tqdm import tqdm   
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
-from torchvision import datasets, transforms
-from torchsummary import summary
-from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import DataLoader
+from torchvision import transforms
 from torchvision.datasets import CIFAR10
-import random
 import torchvision.transforms.functional as TF
-from sklearn.metrics import roc_curve, auc
 import torch.nn.functional as F
+from torchsummary import summary
+
+from sklearn.metrics import roc_curve, auc
+
+torch.set_float32_matmul_precision('medium')
 
 # Define transformations for the CIFAR10 dataset
 transform = transforms.Compose([
@@ -175,116 +177,240 @@ vanilla_autoencoder.to(device)
 
 summary(vanilla_autoencoder, input_size=(3, 128, 128))
 
-# Define the optimizer and loss function
-criterion = nn.MSELoss()
-optimizer = optim.Adam(vanilla_autoencoder.parameters(), lr=0.001)
-
-# Initialize TensorBoard writer
-writer = SummaryWriter("tb_logs/vanilla_autoencoder")
-
-# Training loop
-num_epochs = 20
-train_losses = []  # List to store training losses
-val_losses = []  # List to store validation losses
-
-for epoch in range(num_epochs):  
+# Function to train the model for one epoch
+def train_epoch(vanilla_autoencoder, train_loader, criterion, optimizer):
     vanilla_autoencoder.train()
-    total_loss = 0  # Track total loss for monitoring
+    total_loss = 0
+    for inputs, _ in train_loader:
+        inputs = inputs.to(device)
+        optimizer.zero_grad()
+        outputs = vanilla_autoencoder(inputs)
+        loss = criterion(outputs, inputs)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(train_loader)
 
-    # Use tqdm to add a progress bar to the training
-    with tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}", unit="batch") as tepoch:
-        for img, _ in tepoch:
-            img = img.to(device).float()  # Ensure images are float
-            
-            optimizer.zero_grad()
-            output = vanilla_autoencoder(img)
-            loss = criterion(output, img)
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()  # Accumulate batch loss
-
-            # Update progress bar with the loss value
-            tepoch.set_postfix(loss=loss.item())
-
-    # Average loss per epoch
-    avg_loss = total_loss / len(train_loader)  # Compute average loss
-    train_losses.append(avg_loss)  # Save the average loss
-    print(f'Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.6f}')
-
-    # Log the average loss to TensorBoard
-    writer.add_scalar("Loss/Train", avg_loss, epoch)
-
-    # Validation loop
+# Function to evaluate the model
+def evaluate_model(vanilla_autoencoder, val_loader, criterion):
     vanilla_autoencoder.eval()
-    val_loss = 0
+    total_loss = 0
     with torch.no_grad():
-        for img, _ in val_loader:
-            img = img.to(device).float()
-            output = vanilla_autoencoder(img)
-            loss = criterion(output, img)
-            val_loss += loss.item()
+        for inputs, _ in val_loader:
+            inputs = inputs.to(device)
+            outputs = vanilla_autoencoder(inputs)
+            loss = criterion(outputs, inputs)
+            total_loss += loss.item()
+    return total_loss / len(val_loader)
+
+# Function to test the model and calculate AUROC
+def test_model(vanilla_autoencoder, real_test_loader, ano_test_loaders):
+    vanilla_autoencoder.eval()
+
+    def get_score(loader):
+        log_probs = []
+        with torch.no_grad():
+            for inputs, _ in loader:
+                inputs = inputs.to(device)
+                outputs = vanilla_autoencoder(inputs)
+                mse_loss = F.mse_loss(outputs, inputs, reduction='none').mean(dim=[1, 2, 3])
+                log_probs.append(mse_loss.cpu().numpy())
+        return np.concatenate(log_probs)
+
+    real_log_probs = get_score(real_test_loader)
+    ano_log_probs = [get_score(loader) for loader in ano_test_loaders]
+    aurocs = []
+    for ano_log_prob in ano_log_probs:
+        y_true = np.concatenate([np.ones_like(real_log_probs), np.zeros_like(ano_log_prob)])
+        y_score = np.concatenate([real_log_probs, ano_log_prob])
+        fpr, tpr, _ = roc_curve(y_true, y_score)
+        roc_auc = auc(fpr, tpr)
+        aurocs.append(roc_auc)
+
+    return np.mean(aurocs)
+
+# Function to select the threshold
+def select_threshold(vanilla_autoencoder, real_test_loader, ano_test_loader):
+    vanilla_autoencoder.eval()
+
+    def get_score(loader):
+        log_probs = []
+        with torch.no_grad():
+            for inputs, _ in loader:
+                inputs = inputs.to(device)
+                outputs = vanilla_autoencoder(inputs)
+                mse_loss = F.mse_loss(outputs, inputs, reduction='none').mean(dim=[1, 2, 3])
+                log_probs.append(mse_loss.cpu().numpy())
+        return np.concatenate(log_probs)
+
+    real_log_probs = get_score(real_test_loader)
+    ano_log_probs = get_score(ano_test_loader)
+    y_true = np.concatenate([np.ones_like(real_log_probs), np.zeros_like(ano_log_probs)])
+    y_score = np.concatenate([real_log_probs, ano_log_probs])
+
+    thresholds = np.linspace(0.001, 0.99, 10)
+    best_threshold = 0
+    best_accuracy = 0
+    for threshold in thresholds:
+        binary_score = y_score >= threshold
+        correct = (binary_score == y_true).sum().item()
+        acc = correct / len(y_true)
+        if acc > best_accuracy:
+            best_accuracy = acc
+            best_threshold = threshold
+
+    return best_threshold
+
+def save_weights(model, path):
+    torch.save(model.state_dict(), path)
+
+# Function to display 5 original and reconstructed images from the test dataset
+def display_test_images(vanilla_autoencoder, test_loader):
+    vanilla_autoencoder.eval()
+    images, reconstructed_images = [], []
+    with torch.no_grad():
+        for i, (inputs, _) in enumerate(test_loader):
+            if i >= 5:
+                break
+            inputs = inputs.to(device)
+            outputs = vanilla_autoencoder(inputs)
+            images.append(inputs.cpu().squeeze(0))
+            reconstructed_images.append(outputs.cpu().squeeze(0))
+
+    fig, axs = plt.subplots(5, 2, figsize=(10, 20))
+    for i in range(5):
+        axs[i, 0].imshow(images[i].permute(1, 2, 0).numpy())
+        axs[i, 0].set_title("Original")
+        axs[i, 0].axis("off")
+        axs[i, 1].imshow(reconstructed_images[i].permute(1, 2, 0).numpy())
+        axs[i, 1].set_title("Reconstructed")
+        axs[i, 1].axis("off")
+    plt.show()
+
+# Main function to train and evaluate the model
+def main():
+    global device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    avg_val_loss = val_loss / len(val_loader)
-    val_losses.append(avg_val_loss)
-    print(f'Epoch {epoch+1}/{num_epochs}, Validation Loss: {avg_val_loss:.6f}')
-    writer.add_scalar("Loss/Validation", avg_val_loss, epoch)
+    # Initialize confusion matrix and lists to store results
+    confusion_mat = np.zeros((10, 10))
+    all_aurocs = []
+    all_thresholds = []
+    all_train_losses = []
+    all_val_losses = []
 
-# Save the trained model after training
-torch.save(vanilla_autoencoder.state_dict(), 'vanilla_autoencoder.pth')
-print("Model saved.")
+    # Loop over each class as the real class
+    for real_class in range(10):
+        print(f'Training for real class: {real_class}')
 
-# Plot training and validation losses
-plt.figure(figsize=(10, 5))
-plt.plot(train_losses, label='Training Loss')
-plt.plot(val_losses, label='Validation Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.title('Training and Validation Loss Over Epochs')
-plt.legend()
-plt.show()
+        # Load datasets
+        train_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=True, download=True)
+        val_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=False, download=True)
 
-# Close the TensorBoard writer
-writer.close()
+        train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False)
 
-# Load the trained model in a new session
-vanilla_autoencoder = VanillaAutoencoder(latent_dim).to(device) # Initialize a new instance of the model
-vanilla_autoencoder.load_state_dict(torch.load('vanilla_autoencoder.pth')) # Load the saved model weights
-vanilla_autoencoder.eval()  # Important: Set the model to evaluation mode
+        real_test_loader = DataLoader(val_dataset, batch_size=128, shuffle=False)
+        ano_test_loaders = [DataLoader(OneClassDatasetCIFAR10(root_dir='data', real_class=i, transform=transform, train=False, download=True), batch_size=32, shuffle=False) for i in range(10) if i != real_class]
+
+        # Initialize model, criterion, and optimizer
+        vanilla_autoencoder = VanillaAutoencoder(latent_dim).to(device)
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(vanilla_autoencoder.parameters(), lr=0.0005)
+
+        # Training loop
+        num_epochs = 3
+        train_losses = []
+        val_losses = []
+        for epoch in range(num_epochs):
+            train_loss = train_epoch(vanilla_autoencoder, train_loader, criterion, optimizer)
+            val_loss = evaluate_model(vanilla_autoencoder, val_loader, criterion)
+            train_losses.append(train_loss)
+            val_losses.append(val_loss)
+            print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
+
+        # Store losses
+        all_train_losses.append(train_losses)
+        all_val_losses.append(val_losses)
+
+        # Calculate AUROC
+        auroc = test_model(vanilla_autoencoder, real_test_loader, ano_test_loaders)
+        all_aurocs.append(auroc)
+        print(f'AUROC for class {real_class}: {auroc:.4f}')
+
+        # Select threshold
+        threshold = select_threshold(vanilla_autoencoder, real_test_loader, ano_test_loaders[0])
+        all_thresholds.append(threshold)
+        print(f'Selected Threshold for class {real_class}: {threshold:.4f}')
+
+        # Update confusion matrix
+        def get_predictions(loader, threshold):
+            predictions = []
+            with torch.no_grad():
+                for inputs, _ in loader:
+                    inputs = inputs.to(device)
+                    outputs = vanilla_autoencoder(inputs)
+                    mse_loss = F.mse_loss(outputs, inputs, reduction='none').mean(dim=[1, 2, 3])
+                    preds = (mse_loss < threshold).cpu().numpy()
+                    predictions.append(preds)
+            return np.concatenate(predictions)
+
+        real_preds = get_predictions(real_test_loader, threshold)
+        for i, ano_loader in enumerate(ano_test_loaders):
+            ano_preds = get_predictions(ano_loader, threshold)
+            confusion_mat[real_class, real_class] += np.sum(real_preds == 1)
+            confusion_mat[real_class, i if i < real_class else i + 1] += np.sum(ano_preds == 0)
+
+        # Save the model weights after training for each class
+        save_weights(vanilla_autoencoder, f'models/vanilla_autoencoder_class_{real_class}_weights.pth')
+
+    return confusion_mat, all_aurocs, all_thresholds, all_train_losses, all_val_losses
+
+# Call the main function and get results
+confusion_mat, all_aurocs, all_thresholds, all_train_losses, all_val_losses = main()
+
+# Display 5 original and reconstructed images from the test dataset
+test_loader = DataLoader(val_dataset, batch_size=1, shuffle=True)
+display_test_images(vanilla_autoencoder, test_loader)
+
+# Función para graficar las pérdidas
+def plot_losses(train_losses, val_losses, class_index):
+    plt.figure(figsize=(10, 5))
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title(f'Training and Validation Loss for Class {class_index}')
+    plt.legend()
+    plt.show()
+
+# Función para graficar la matriz de confusión
+def plot_confusion_matrix(confusion_mat):
+    plt.figure(figsize=(10, 7))
+    sns.heatmap(confusion_mat, annot=True, fmt='g', cmap='Blues', xticklabels=range(10), yticklabels=range(10))
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+    plt.show()
+
+# Función para graficar AUROC y umbrales
+def plot_auroc_thresholds(aurocs, thresholds):
+    plt.figure(figsize=(10, 5))
+    plt.bar(range(10), aurocs, alpha=0.6, label='AUROC')
+    plt.plot(range(10), thresholds, marker='o', linestyle='--', color='red', label='Threshold')
+    plt.xlabel('Class')
+    plt.ylabel('Value')
+    plt.title('AUROC and Thresholds for Each Class')
+    plt.legend()
+    plt.show()
+
+def load_weights(model, path):
+    model.load_state_dict(torch.load(path)) # Load the saved model weights
+    model.eval()  # Important: Set the model to evaluation mode
+
+vanilla_autoencoder = VanillaAutoencoder(latent_dim).to(device)
+load_weights(vanilla_autoencoder, 'models/vanilla_autoencoder_weights.pth')
 print("Model loaded and ready to use.")
-
-# Function to compare one real image with the image reconstructed by the decoder
-def compare_real_and_reconstructed(loader, model, index=1):
-    model.eval()
-    with torch.no_grad():
-        for img, _ in loader:
-            img = img.to(device)
-            output = model(img)
-            img = img.cpu().numpy()
-            output = output.cpu().numpy()
-            
-            fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-            
-            # Transponer las imágenes de (C, H, W) a (H, W, C)
-            real_img = np.transpose(img[index], (1, 2, 0))
-            reconstructed_img = np.transpose(output[index], (1, 2, 0))
-            
-            # Mostrar las imágenes
-            axes[0].imshow(real_img)
-            axes[0].set_title('Real Image')
-            axes[0].set_xticks(np.arange(0, img.shape[2], 16))
-            axes[0].set_yticks(np.arange(0, img.shape[3], 16))
-            
-            axes[1].imshow(reconstructed_img)
-            axes[1].set_title('Reconstructed Image')
-            axes[1].set_xticks(np.arange(0, output.shape[2], 16))
-            axes[1].set_yticks(np.arange(0, output.shape[3], 16))
-            
-            plt.show()
-            break
-
-# Compare one real image with the reconstructed image
-compare_real_and_reconstructed(test_loader, vanilla_autoencoder)
 
 # Function to add noise to images
 # This function adds Gaussian noise to the input images.
@@ -317,163 +443,10 @@ for epoch in range(num_epochs):
     print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {running_loss/len(train_loader)}')
 
 # Save the trained denoising autoencoder model after training
-torch.save(denoising_autoencoder.state_dict(), 'denoising_autoencoder.pth')
+torch.save(denoising_autoencoder.state_dict(), 'models/denoising_autoencoder.pth')
 print("Denoising Autoencoder model saved.")
 
 # Load the trained denoising autoencoder model for testing
-denoising_autoencoder.load_state_dict(torch.load('denoising_autoencoder.pth'))
+denoising_autoencoder.load_state_dict(torch.load('models/denoising_autoencoder.pth'))
 denoising_autoencoder.eval()
 print("Denoising Autoencoder model loaded and ready to use.")
-
-# Function to show original and reconstructed images
-# This function visualizes the original and reconstructed images.
-# It takes a data loader and the trained model as input, and displays a few examples of original and reconstructed images.
-def show_images(loader, model):
-    model.eval()
-    with torch.no_grad():
-        for img, _ in loader:
-            img = img.to(device)
-            output = model(img)
-            img = img.cpu().numpy()
-            output = output.cpu().numpy()
-            fig, axes = plt.subplots(2, 5, figsize=(10, 4))
-            for i in range(5):
-                axes[0, i].imshow(np.transpose(img[i], (1, 2, 0)))  # Ensure values are in [0, 1]
-                axes[0, i].set_xticks(np.arange(0, img.shape[2] + 1, img.shape[2]))
-                axes[0, i].set_yticks(np.arange(0, img.shape[3] + 1, img.shape[3]))
-                axes[0, i].axis('on')  # Keep axes visible
-                axes[1, i].imshow(np.transpose(output[i], (1, 2, 0)))  # Ensure values are in [0, 1]
-                axes[1, i].set_xticks(np.arange(0, output.shape[2] + 1, output.shape[2]))
-                axes[1, i].set_yticks(np.arange(0, output.shape[3] + 1, output.shape[3]))
-                axes[1, i].axis('on')  # Keep axes visible
-            plt.show()
-            break
-
-show_images(test_loader, denoising_autoencoder)
-summary(vanilla_autoencoder, input_size=(3, 128, 128))
-
-def train_epoch(model, train_loader, criterion, optimizer):
-    model.train()
-    tloss = 0
-    for i, data in enumerate(train_loader, 0):
-        inputs, labels = data
-        inputs, labels = inputs.cuda(), labels.cuda()
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-        tloss += loss.item()
-    return tloss / len(train_loader)
-
-def evaluate_model(model, test_loader, criterion):
-    model.eval()
-    correct = 0
-    total = 0
-    tloss = 0
-    with torch.no_grad():
-        for data in test_loader:
-            images, labels = data
-            images, labels = images.cuda(), labels.cuda()
-            outputs = model(images)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-            loss = criterion(outputs, labels)
-            tloss += loss.item()
-
-    return tloss / len(test_loader), correct / total
-
-def test_model(model, real_test_loader, ano_test_loaders):
-    model.eval()
-
-    def get_score(loader):
-        lopprobs = []
-        with torch.no_grad():
-            for data in loader:
-                images, labels = data
-                images, labels = images.cuda(), labels.cuda()
-                outputs = model(images)
-                logp = F.softmax(outputs, dim=1)[list(range(images.shape[0])), labels]
-                lopprobs.append(logp.cpu().numpy())
-        return np.concatenate(lopprobs)
-
-    real_lopprobs = get_score(real_test_loader)
-    ano_lopprobs = [get_score(loader) for loader in ano_test_loaders]
-    aurocs = []
-    for i in range(9):
-        y_true = np.concatenate([np.ones_like(real_lopprobs), np.zeros_like(ano_lopprobs[i])])
-        y_score = np.concatenate([real_lopprobs, ano_lopprobs[i]])
-
-        fpr, tpr, roc_thresholds = roc_curve(y_true, y_score)
-        roc_auc = auc(fpr, tpr)
-
-        aurocs.append(roc_auc)
-
-    return np.mean(aurocs)
-
-def select_th(model, real_test_loader, ano_test_loader):
-    model.eval()
-
-    def get_score(loader):
-        lopprobs = []
-        with torch.no_grad():
-            for data in loader:
-                images, labels = data
-                images, labels = images.cuda(), labels.cuda()
-                outputs = model(images)
-                logp = F.softmax(outputs, dim=1)[list(range(images.shape[0])), labels]
-                lopprobs.append(logp.cpu().numpy())
-        return np.concatenate(lopprobs)
-
-    real_lopprobs = get_score(real_test_loader)
-    ano_lopprobs = get_score(ano_test_loader)
-    y_true = np.concatenate([np.ones_like(real_lopprobs), np.zeros_like(ano_lopprobs)])
-    y_score = np.concatenate([real_lopprobs, ano_lopprobs])
-
-    lam = np.linspace(0.001, 0.99, 10)
-    for l in lam:
-        b_score = y_score >= l
-        correct = (b_score == y_true).sum().item()
-        acc = correct / len(y_true)
-        print(acc, l)
-
-def main(real_class):
-    transform = transforms.Compose([
-        transforms.Resize((128, 128)),
-        transforms.ToTensor()
-    ])
-
-    train_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=True, download=True)
-    val_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=False, download=True)
-
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
-
-    real_test_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=False, download=True)
-    real_test_loader = DataLoader(real_test_dataset, batch_size=32, shuffle=False)
-    ano_test_datasets = []
-    ano_test_loaders = []
-    for i in range(10):
-        if i == real_class:
-            continue
-        ano_test_datasets.append(OneClassDatasetCIFAR10(root_dir='data', real_class=i, transform=transform, train=False, download=True))
-        ano_test_loaders.append(DataLoader(ano_test_datasets[-1], batch_size=32, shuffle=False))
-
-    model = VanillaAutoencoder(latent_dim)
-    model = model.cuda()
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-
-    for epoch in range(2):
-        tloss = train_epoch(model, train_loader, criterion, optimizer)
-        val_loss, val_acc = evaluate_model(model, val_loader, criterion)
-        print(f'Epoch {epoch} Train Loss: {tloss} Test Loss: {val_loss} Test Accuracy: {val_acc}')
-
-    aurocs = test_model(model, real_test_loader, ano_test_loaders)
-    print('AUROCs:', aurocs)
-
-    select_th(model, real_test_loader, ano_test_loaders[8])
-
-if __name__ == "__main__":
-    main(real_class=1)
