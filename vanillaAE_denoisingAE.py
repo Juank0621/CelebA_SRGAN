@@ -11,89 +11,61 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
 from torchsummary import summary
-import lightning as L
-from lightning.pytorch.loggers import TensorBoardLogger
+from torch.utils.tensorboard import SummaryWriter
+from torchvision.datasets import CIFAR10
+import random
+import torchvision.transforms.functional as TF
+from sklearn.metrics import roc_curve, auc
+import torch.nn.functional as F
 
-data_dir= 'data/celeba'
+# Define transformations for the CIFAR10 dataset
+transform = transforms.Compose([
+    transforms.Resize((128, 128)),
+    transforms.ToTensor()
+]) 
 
-# Custom Dataset class for loading images from a single folder
-class CelebADataset(Dataset):
-    def __init__(self, root_dir, transform=None):
-        self.root_dir = root_dir
-        self.transform = transform
-        self.image_files = [f for f in os.listdir(root_dir) if os.path.isfile(os.path.join(root_dir, f))]
+# Custom Dataset class for loading CIFAR10 images of a specific class
+class OneClassDatasetCIFAR10(CIFAR10):
+    def __init__(self, root_dir, real_class=1, transform=None, train=True, download=True):
+        super().__init__(root=root_dir, transform=transform, train=train, download=download)
+        self.real_class = real_class
+        self.samples = []
+        for i in range(len(self.data)):
+            if self.targets[i] == self.real_class:
+                self.samples.append((self.data[i], self.targets[i]))
 
     def __len__(self):
-        return len(self.image_files)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        img_name = os.path.join(self.root_dir, self.image_files[idx])
-        image = Image.open(img_name)
+        data = self.samples[idx]
+        image = TF.to_tensor(data[0])
+        image = image / 255
+
         if self.transform:
             image = self.transform(image)
-        # Return a dummy label because the autoencoder does not need labels
-        return image, 0
 
-# Load the CelebA dataset from the local folder
-dataset = CelebADataset(root_dir=data_dir, transform=None)
+        label = 0  # Dummy label as autoencoder does not need labels
 
-# Verify the number of images in dataset
-print(f'Number of images in dataset: {len(dataset)}')
+        return image, label
 
-# Function to show real images 
-def show_real_images(image_paths, transform=None):
-    images = []
-    for img_path in image_paths:
-        image = Image.open(img_path)
-        if transform:
-            image = transform(image)
-        images.append(np.array(image))  # Convert to numpy array
-    
-    # Create subplots with a fixed aspect ratio and a layout proportional to the images
-    fig, axes = plt.subplots(1, len(images), figsize=(15, 5))
-    if len(images) == 1:  # If there's only one image, axes is not an array
-        axes = [axes]
-    
-    for i, img in enumerate(images):
-        if img.shape[0] == 3:  
-            img = np.transpose(img, (1, 2, 0))  # Convert from CHW to HWC format
-        # Show image
-        axes[i].imshow(img)
-        # Set the axis labels and ticks as proportional
-        axes[i].xaxis.set_major_locator(MaxNLocator(integer=True))
-        axes[i].yaxis.set_major_locator(MaxNLocator(integer=True))
-        
-        # Turn on axis
-        axes[i].axis('on')
-        
-    plt.tight_layout()
-    plt.show()
+# Load the CIFAR10 dataset
+train_dataset = CIFAR10(root='data', train=True, download=True, transform=None)
+test_dataset = CIFAR10(root='data', train=False, download=True, transform=None)
 
-# Example usage of show_real_images
-image_paths = [os.path.join(dataset.root_dir, dataset.image_files[i]) for i in range(5)]
-show_real_images(image_paths)
-
-# Here we define the transformations to be applied to the images in the CelebA dataset.
-# We resize the images to 64x64 pixels and convert them to tensors.
-transform = transforms.Compose([
-    transforms.Resize((128,128)),
-    transforms.ToTensor()
-])
-
-# Dataset and DataLoader with transforms
-dataset = CelebADataset(root_dir=data_dir, transform=transform)
-
-# Split the dataset into training and test sets
-train_size = int(0.8 * len(dataset))
-test_size = len(dataset) - train_size
-train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+# Split the training dataset into training and validation sets
+train_size = int(0.8 * len(train_dataset))
+val_size = len(train_dataset) - train_size
+train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
 
 # Verify the number of images in each dataset
 print(f'Number of images in training dataset: {len(train_dataset)}')
+print(f'Number of images in validation dataset: {len(val_dataset)}')
 print(f'Number of images in test dataset: {len(test_dataset)}')
 
-# Create data loaders for the training and test datasets.
+# Create data loaders for the training, validation, and test datasets
 train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
 # Function to show images from the CelebA dataset
@@ -207,8 +179,14 @@ summary(vanilla_autoencoder, input_size=(3, 128, 128))
 criterion = nn.MSELoss()
 optimizer = optim.Adam(vanilla_autoencoder.parameters(), lr=0.001)
 
+# Initialize TensorBoard writer
+writer = SummaryWriter("tb_logs/vanilla_autoencoder")
+
 # Training loop
-num_epochs = 50
+num_epochs = 20
+train_losses = []  # List to store training losses
+val_losses = []  # List to store validation losses
+
 for epoch in range(num_epochs):  
     vanilla_autoencoder.train()
     total_loss = 0  # Track total loss for monitoring
@@ -231,11 +209,43 @@ for epoch in range(num_epochs):
 
     # Average loss per epoch
     avg_loss = total_loss / len(train_loader)  # Compute average loss
+    train_losses.append(avg_loss)  # Save the average loss
     print(f'Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.6f}')
+
+    # Log the average loss to TensorBoard
+    writer.add_scalar("Loss/Train", avg_loss, epoch)
+
+    # Validation loop
+    vanilla_autoencoder.eval()
+    val_loss = 0
+    with torch.no_grad():
+        for img, _ in val_loader:
+            img = img.to(device).float()
+            output = vanilla_autoencoder(img)
+            loss = criterion(output, img)
+            val_loss += loss.item()
+    
+    avg_val_loss = val_loss / len(val_loader)
+    val_losses.append(avg_val_loss)
+    print(f'Epoch {epoch+1}/{num_epochs}, Validation Loss: {avg_val_loss:.6f}')
+    writer.add_scalar("Loss/Validation", avg_val_loss, epoch)
 
 # Save the trained model after training
 torch.save(vanilla_autoencoder.state_dict(), 'vanilla_autoencoder.pth')
 print("Model saved.")
+
+# Plot training and validation losses
+plt.figure(figsize=(10, 5))
+plt.plot(train_losses, label='Training Loss')
+plt.plot(val_losses, label='Validation Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training and Validation Loss Over Epochs')
+plt.legend()
+plt.show()
+
+# Close the TensorBoard writer
+writer.close()
 
 # Load the trained model in a new session
 vanilla_autoencoder = VanillaAutoencoder(latent_dim).to(device) # Initialize a new instance of the model
@@ -341,3 +351,129 @@ def show_images(loader, model):
 
 show_images(test_loader, denoising_autoencoder)
 summary(vanilla_autoencoder, input_size=(3, 128, 128))
+
+def train_epoch(model, train_loader, criterion, optimizer):
+    model.train()
+    tloss = 0
+    for i, data in enumerate(train_loader, 0):
+        inputs, labels = data
+        inputs, labels = inputs.cuda(), labels.cuda()
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        tloss += loss.item()
+    return tloss / len(train_loader)
+
+def evaluate_model(model, test_loader, criterion):
+    model.eval()
+    correct = 0
+    total = 0
+    tloss = 0
+    with torch.no_grad():
+        for data in test_loader:
+            images, labels = data
+            images, labels = images.cuda(), labels.cuda()
+            outputs = model(images)
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+            loss = criterion(outputs, labels)
+            tloss += loss.item()
+
+    return tloss / len(test_loader), correct / total
+
+def test_model(model, real_test_loader, ano_test_loaders):
+    model.eval()
+
+    def get_score(loader):
+        lopprobs = []
+        with torch.no_grad():
+            for data in loader:
+                images, labels = data
+                images, labels = images.cuda(), labels.cuda()
+                outputs = model(images)
+                logp = F.softmax(outputs, dim=1)[list(range(images.shape[0])), labels]
+                lopprobs.append(logp.cpu().numpy())
+        return np.concatenate(lopprobs)
+
+    real_lopprobs = get_score(real_test_loader)
+    ano_lopprobs = [get_score(loader) for loader in ano_test_loaders]
+    aurocs = []
+    for i in range(9):
+        y_true = np.concatenate([np.ones_like(real_lopprobs), np.zeros_like(ano_lopprobs[i])])
+        y_score = np.concatenate([real_lopprobs, ano_lopprobs[i]])
+
+        fpr, tpr, roc_thresholds = roc_curve(y_true, y_score)
+        roc_auc = auc(fpr, tpr)
+
+        aurocs.append(roc_auc)
+
+    return np.mean(aurocs)
+
+def select_th(model, real_test_loader, ano_test_loader):
+    model.eval()
+
+    def get_score(loader):
+        lopprobs = []
+        with torch.no_grad():
+            for data in loader:
+                images, labels = data
+                images, labels = images.cuda(), labels.cuda()
+                outputs = model(images)
+                logp = F.softmax(outputs, dim=1)[list(range(images.shape[0])), labels]
+                lopprobs.append(logp.cpu().numpy())
+        return np.concatenate(lopprobs)
+
+    real_lopprobs = get_score(real_test_loader)
+    ano_lopprobs = get_score(ano_test_loader)
+    y_true = np.concatenate([np.ones_like(real_lopprobs), np.zeros_like(ano_lopprobs)])
+    y_score = np.concatenate([real_lopprobs, ano_lopprobs])
+
+    lam = np.linspace(0.001, 0.99, 10)
+    for l in lam:
+        b_score = y_score >= l
+        correct = (b_score == y_true).sum().item()
+        acc = correct / len(y_true)
+        print(acc, l)
+
+def main(real_class):
+    transform = transforms.Compose([
+        transforms.Resize((128, 128)),
+        transforms.ToTensor()
+    ])
+
+    train_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=True, download=True)
+    val_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=False, download=True)
+
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+
+    real_test_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=False, download=True)
+    real_test_loader = DataLoader(real_test_dataset, batch_size=32, shuffle=False)
+    ano_test_datasets = []
+    ano_test_loaders = []
+    for i in range(10):
+        if i == real_class:
+            continue
+        ano_test_datasets.append(OneClassDatasetCIFAR10(root_dir='data', real_class=i, transform=transform, train=False, download=True))
+        ano_test_loaders.append(DataLoader(ano_test_datasets[-1], batch_size=32, shuffle=False))
+
+    model = VanillaAutoencoder(latent_dim)
+    model = model.cuda()
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    for epoch in range(2):
+        tloss = train_epoch(model, train_loader, criterion, optimizer)
+        val_loss, val_acc = evaluate_model(model, val_loader, criterion)
+        print(f'Epoch {epoch} Train Loss: {tloss} Test Loss: {val_loss} Test Accuracy: {val_acc}')
+
+    aurocs = test_model(model, real_test_loader, ano_test_loaders)
+    print('AUROCs:', aurocs)
+
+    select_th(model, real_test_loader, ano_test_loaders[8])
+
+if __name__ == "__main__":
+    main(real_class=1)

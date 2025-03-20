@@ -121,5 +121,7 @@ lightning_logs/
 
 # Data directories
 data/
-images/
 lightning_logs/
+
+# Comments files
+*.comments

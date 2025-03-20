@@ -1,5 +1,3 @@
 transformers
 ultralytics
-gdown
 torchsummary
-lightning
