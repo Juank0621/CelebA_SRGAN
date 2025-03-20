@@ -4,6 +4,8 @@
 
 <h1 align="center">Generative AI + Anomaly Detection on CIFAR-10</h1>
 
+<br>
+
 <p align="center">Developed by <a href="https://www.linkedin.com/in/juancarlosgarzon/">Juan Carlos Garzon</a>, <a href="https://www.linkedin.com/in/vivialves-developer/">Viviane Alves</a> </p>
 
 <br>
