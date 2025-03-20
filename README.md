@@ -10,7 +10,7 @@
 [![GitHub](https://badges.aleen42.com/src/github.svg)](https://github.com/Juank0621)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Profile-blue?logo=linkedin)](https://www.linkedin.com/in/juancarlosgarzon)
 ![Python](https://badges.aleen42.com/src/python.svg)
-[![license](https://img.shields.io/pypi/l/supervision)](https://github.com/Juank0621/CIFAR10_GenerativeAI/LICENSE)
+[![license](https://img.shields.io/pypi/l/supervision)](https://github.com/Juank0621/CIFAR10_GenerativeAI/LICENCE)
 
 
 ---
