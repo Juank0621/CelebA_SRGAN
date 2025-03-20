@@ -1,3 +1,6 @@
 transformers
 ultralytics
 torchsummary
+seaborn
+tqdm
+scikit-learn
