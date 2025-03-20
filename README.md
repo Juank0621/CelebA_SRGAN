@@ -14,6 +14,7 @@
 [![license](https://img.shields.io/pypi/l/supervision)](https://github.com/Juank0621/CIFAR10_GenerativeAI/blob/main/LICENSE)
 
 </div>
+
 ---
 
 <p align="center">
