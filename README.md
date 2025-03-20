@@ -1,14 +1,14 @@
 <p align="center">
-  <img src="personal_logo.png" alt="Logo" width="400"/>
+  <img src="images/personal_logo.png" alt="Logo" width="400"/>
 </p>
 
 # 🧠 Generative AI + Anomaly Detection on CIFAR-10 🖼️
-<p align="center">Developed by [Juan Carlos Garzon - Viviane Alves](https://www.linkedin.com/in/juancarlosgarzon/)</p>
+<p align="center">Developed by <a href="https://www.linkedin.com/in/juancarlosgarzon/">Juan Carlos Garzon</a>, <a href="https://www.linkedin.com/in/vivialves-developer/">Viviane Alves</a> </p>
 
 ---
 
 <p align="center">
-  <img src="background.jpg" alt="Image" width="600"/>
+  <img src="cifar10.png" alt="Image" width="600"/>
 </p>
 
 ---
