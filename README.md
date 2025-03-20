@@ -18,7 +18,7 @@
 ---
 
 <p align="center">
-  <img src="cifar10.png" alt="Image" width="600"/>
+  <img src="images/cifar10.png" alt="Image" width="600"/>
 </p>
 
 ---
