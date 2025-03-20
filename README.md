@@ -2,7 +2,7 @@
   <img src="images/personal_logo.png" alt="Logo" width="400"/>
 </p>
 
-# 🧠 Generative AI + Anomaly Detection on CIFAR-10 🖼️
+## 🧠 Generative AI + Anomaly Detection on CIFAR-10 🖼️
 <p align="center">Developed by <a href="https://www.linkedin.com/in/juancarlosgarzon/">Juan Carlos Garzon</a>, <a href="https://www.linkedin.com/in/vivialves-developer/">Viviane Alves</a> </p>
 
 ---
@@ -74,7 +74,7 @@ After training, a **Streamlit** web app allows users to:
 
 ## 🚀 Getting Started
 
-To reproduce this project, follow these steps. The project was trained on **Ubuntu** using an **NVIDIA RTX 4080 GPU**.
+To get started with the **Generative AI + Anomaly Detection on CIFAR-10** project, follow the steps below. The models were trained using **Visual Studio Code**, running on **Linux Ubuntu**, with an **NVIDIA GeForce RTX 4080 GPU**.
 
 ### Prerequisites
 - **Miniforge/Mamba** (environment management)
