@@ -2,7 +2,7 @@
   <img src="images/personal_logo.png" alt="Logo" width="400"/>
 </p>
 
-<h1 align="center">🧠 Generative AI + Anomaly Detection on CIFAR-10 🖼️</h1>
+<h1 align="center">Generative AI + Anomaly Detection on CIFAR-10</h1>
 
 <p align="center">Developed by <a href="https://www.linkedin.com/in/juancarlosgarzon/">Juan Carlos Garzon</a>, <a href="https://www.linkedin.com/in/vivialves-developer/">Viviane Alves</a> </p>
 
