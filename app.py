@@ -79,7 +79,28 @@ def main():
 
         # Calculate MSE loss to determine if the image is an anomaly
         mse_loss = torch.nn.functional.mse_loss(reconstructed, input_tensor.cpu().squeeze(0), reduction='mean').item()
-        threshold = 0.01  # This threshold should be determined based on your training results
+
+        if selected_model_type == 'vanilla_autoencoder':
+            if class_index == 0:
+                threshold = 0.0010
+            else:
+                threshold = 0.1109
+        elif selected_model_type == 'denoising_autoencoder':
+            if class_index == 0:
+                threshold = 0.9900
+            elif class_index == 1 or class_index == 5 or class_index == 8:
+                threshold = 0.2208
+            elif class_index == 2 or class_index == 6:
+                threshold = 0.7702
+            elif class_index == 3 or class_index == 4:
+                threshold = 0.4406
+            elif class_index == 7 or class_index == 9:
+                threshold = 0.1109
+        print(class_index)
+        print(selected_model_type)
+        print(threshold)
+        print(mse_loss)
+        # threshold = 0.01  # This threshold should be determined based on your training results
 
         # Display anomaly detection result
         if mse_loss > threshold:
