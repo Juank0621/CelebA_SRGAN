@@ -124,5 +124,5 @@ cifar10_test_images/
 *.comments
 
 # Models directory
-# models/
+models/
 
