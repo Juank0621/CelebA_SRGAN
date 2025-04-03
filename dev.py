@@ -538,133 +538,168 @@ def main_denoising():
 # Call the main function for denoising autoencoder and get results
 confusion_mat, all_aurocs, all_thresholds, all_train_losses, all_val_losses = main_denoising()
 
+# Variational Autoencoder (VAE)
 
-## Variational autoencoder (VAE)
-
-batch_size = 100
-
-x_dim  = 784
-hidden_dim = 400
-latent_dim = 200
-
-lr = 1e-3
-
-epochs = 30
-
-
-mnist_transform = transforms.Compose([
-        transforms.ToTensor(),
-])
-
-kwargs = {'num_workers': 1, 'pin_memory': True} 
-
-train_dataset = MNIST(dataset_path, transform=mnist_transform, train=True, download=True)
-test_dataset  = MNIST(dataset_path, transform=mnist_transform, train=False, download=True)
-
-train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, **kwargs)
-test_loader  = DataLoader(dataset=test_dataset,  batch_size=batch_size, shuffle=False, **kwargs)
-
-
-"""
-    A simple implementation of Gaussian MLP Encoder and Decoder
-"""
-
-class Encoder(nn.Module):
-    
+class VAEEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim):
-        super(Encoder, self).__init__()
+        super(VAEEncoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
+        self.mean = nn.Linear(hidden_dim, latent_dim)
+        self.log_var = nn.Linear(hidden_dim, latent_dim)
 
-        self.FC_input = nn.Linear(input_dim, hidden_dim)
-        self.FC_input2 = nn.Linear(hidden_dim, hidden_dim)
-        self.FC_mean  = nn.Linear(hidden_dim, latent_dim)
-        self.FC_var   = nn.Linear (hidden_dim, latent_dim)
-        
-        self.LeakyReLU = nn.LeakyReLU(0.2)
-        
-        self.training = True
-        
     def forward(self, x):
-        h_       = self.LeakyReLU(self.FC_input(x))
-        h_       = self.LeakyReLU(self.FC_input2(h_))
-        mean     = self.FC_mean(h_)
-        log_var  = self.FC_var(h_)                     # encoder produces mean and log of variance 
-                                                       #             (i.e., parateters of simple tractable normal distribution "q"
-        
+        h = self.encoder(x)
+        mean = self.mean(h)
+        log_var = self.log_var(h)
         return mean, log_var
-    
 
-class Decoder(nn.Module):
+
+class VAEDecoder(nn.Module):
     def __init__(self, latent_dim, hidden_dim, output_dim):
-        super(Decoder, self).__init__()
-        self.FC_hidden = nn.Linear(latent_dim, hidden_dim)
-        self.FC_hidden2 = nn.Linear(hidden_dim, hidden_dim)
-        self.FC_output = nn.Linear(hidden_dim, output_dim)
-        
-        self.LeakyReLU = nn.LeakyReLU(0.2)
-        
+        super(VAEDecoder, self).__init__()
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim),
+            nn.Sigmoid()
+        )
+
+    def forward(self, z):
+        return self.decoder(z)
+
+
+class VAE(nn.Module):
+    def __init__(self, input_dim, hidden_dim, latent_dim):
+        super(VAE, self).__init__()
+        self.encoder = VAEEncoder(input_dim, hidden_dim, latent_dim)
+        self.decoder = VAEDecoder(latent_dim, hidden_dim, input_dim)
+
+    def reparameterize(self, mean, log_var):
+        std = torch.exp(0.5 * log_var)
+        epsilon = torch.randn_like(std)
+        return mean + epsilon * std
+
     def forward(self, x):
-        h     = self.LeakyReLU(self.FC_hidden(x))
-        h     = self.LeakyReLU(self.FC_hidden2(h))
-        
-        x_hat = torch.sigmoid(self.FC_output(h))
-        return x_hat
-    
-class Model(nn.Module):
-    def __init__(self, Encoder, Decoder):
-        super(Model, self).__init__()
-        self.Encoder = Encoder
-        self.Decoder = Decoder
-        
-    def reparameterization(self, mean, var):
-        epsilon = torch.randn_like(var).to(DEVICE)      # sampling epsilon        
-        z = mean + var*epsilon                          # reparameterization trick
-        return z
-        
-                
-    def forward(self, x):
-        mean, log_var = self.Encoder(x)
-        z = self.reparameterization(mean, torch.exp(0.5 * log_var)) # takes exponential function (log var -> var)
-        x_hat            = self.Decoder(z)
-        
+        mean, log_var = self.encoder(x)
+        z = self.reparameterize(mean, log_var)
+        x_hat = self.decoder(z)
         return x_hat, mean, log_var
-    
-encoder = Encoder(input_dim=x_dim, hidden_dim=hidden_dim, latent_dim=latent_dim)
-decoder = Decoder(latent_dim=latent_dim, hidden_dim = hidden_dim, output_dim = x_dim)
-
-model = Model(Encoder=encoder, Decoder=decoder).to(DEVICE)
-
-from torch.optim import Adam
-
-BCE_loss = nn.BCELoss()
-
-def loss_function(x, x_hat, mean, log_var):
-    reproduction_loss = nn.functional.binary_cross_entropy(x_hat, x, reduction='sum')
-    KLD      = - 0.5 * torch.sum(1+ log_var - mean.pow(2) - log_var.exp())
-
-    return reproduction_loss + KLD
 
 
-optimizer = Adam(model.parameters(), lr=lr)
+def vae_loss_function(x, x_hat, mean, log_var):
+    reconstruction_loss = nn.functional.mse_loss(x_hat, x, reduction='sum')
+    kl_divergence = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
+    return reconstruction_loss + kl_divergence
 
-print("Start training VAE...")
-model.train()
 
-for epoch in range(epochs):
-    overall_loss = 0
-    for batch_idx, (x, _) in enumerate(train_loader):
-        x = x.view(batch_size, x_dim)
-        x = x.to(DEVICE)
-
+def train_vae_epoch(vae, train_loader, optimizer):
+    vae.train()
+    total_loss = 0
+    for inputs, _ in train_loader:
+        inputs = inputs.view(inputs.size(0), -1).to(device)
         optimizer.zero_grad()
-
-        x_hat, mean, log_var = model(x)
-        loss = loss_function(x, x_hat, mean, log_var)
-        
-        overall_loss += loss.item()
-        
+        x_hat, mean, log_var = vae(inputs)
+        loss = vae_loss_function(inputs, x_hat, mean, log_var)
         loss.backward()
         optimizer.step()
-        
-    print("\tEpoch", epoch + 1, "complete!", "\tAverage Loss: ", overall_loss / (batch_idx*batch_size))
-    
-print("Finish!!")
+        total_loss += loss.item()
+    return total_loss / len(train_loader)
+
+
+def evaluate_vae(vae, val_loader):
+    vae.eval()
+    total_loss = 0
+    with torch.no_grad():
+        for inputs, _ in val_loader:
+            inputs = inputs.view(inputs.size(0), -1).to(device)
+            x_hat, mean, log_var = vae(inputs)
+            loss = vae_loss_function(inputs, x_hat, mean, log_var)
+            total_loss += loss.item()
+    return total_loss / len(val_loader)
+
+
+def calculate_mahalanobis_distance(mean, covariance, x):
+    diff = x - mean
+    inv_covariance = torch.linalg.inv(covariance)
+    distance = torch.sqrt(torch.mm(torch.mm(diff.unsqueeze(0), inv_covariance), diff.unsqueeze(1)))
+    return distance.item()
+
+
+def test_vae(vae, test_loader, threshold):
+    vae.eval()
+    anomalies = []
+    with torch.no_grad():
+        for inputs, _ in test_loader:
+            inputs = inputs.view(inputs.size(0), -1).to(device)
+            x_hat, mean, log_var = vae(inputs)
+            z = vae.reparameterize(mean, log_var)
+            distances = [calculate_mahalanobis_distance(mean[i], torch.eye(mean.size(1)).to(device), z[i]) for i in range(z.size(0))]
+            anomalies.extend([d > threshold for d in distances])
+    return anomalies
+
+
+def main_vae():
+    input_dim = 128 * 128 * 3
+    hidden_dim = 512
+    latent_dim = 128
+    num_epochs = 20
+    learning_rate = 0.001
+
+    vae = VAE(input_dim, hidden_dim, latent_dim).to(device)
+    optimizer = torch.optim.Adam(vae.parameters(), lr=learning_rate)
+
+    all_train_losses = []
+    all_val_losses = []
+
+    for real_class in range(10):
+        print(f"Training VAE for class {real_class}...")
+
+        train_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=True, download=True)
+        val_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=False, download=True)
+
+        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+
+        train_losses = []
+        val_losses = []
+
+        for epoch in range(num_epochs):
+            train_loss = train_vae_epoch(vae, train_loader, optimizer)
+            val_loss = evaluate_vae(vae, val_loader)
+            train_losses.append(train_loss)
+            val_losses.append(val_loss)
+            print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+
+        all_train_losses.append(train_losses)
+        all_val_losses.append(val_losses)
+
+        # Save the trained model
+        torch.save(vae.state_dict(), f'models/vae/vae_class_{real_class}_weights.pth')
+
+    return all_train_losses, all_val_losses
+
+
+# Call the main function for VAE
+all_train_losses, all_val_losses = main_vae()
+
+# Plot training and validation losses
+def plot_vae_losses(train_losses, val_losses, class_index):
+    plt.figure(figsize=(10, 5))
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title(f'VAE Training and Validation Loss for Class {class_index}')
+    plt.legend()
+    plt.show()
+
+
+# Example: Plot losses for class 0
+plot_vae_losses(all_train_losses[0], all_val_losses[0], class_index=0)
