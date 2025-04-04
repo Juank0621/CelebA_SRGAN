@@ -5,6 +5,7 @@ from matplotlib.ticker import MaxNLocator
 import seaborn as sns
 from PIL import Image
 from tqdm import tqdm   
+from tqdm.rich import tqdm  # Import tqdm.rich for progress bars
 
 import torch
 import torch.nn as nn
@@ -70,7 +71,7 @@ train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
-# Function to show images from the CelebA dataset
+# Function to show images from the CIFAR10 dataset
 def show_transform_images(loader):
     data_iter = iter(loader)
     images, _ = next(data_iter)
@@ -83,7 +84,7 @@ def show_transform_images(loader):
             axes[i, j].set_yticks(np.arange(0, images.shape[3], 32))
     plt.show()
 
-# Show images from the CelebA dataset
+# Show images from the CIFAR10 dataset
 show_transform_images(train_loader)
 
 # Define the Vanilla Autoencoder Model
@@ -177,11 +178,12 @@ vanilla_autoencoder.to(device)
 
 summary(vanilla_autoencoder, input_size=(3, 128, 128))
 
-# Function to train the model for one epoch
+# Function to train the model for one epoch with tqdm.rich
 def train_epoch(vanilla_autoencoder, train_loader, criterion, optimizer):
     vanilla_autoencoder.train()
     total_loss = 0
-    for inputs, _ in train_loader:
+    # Use tqdm.rich to display progress
+    for inputs, _ in tqdm(train_loader, desc="Training Epoch", leave=False):
         inputs = inputs.to(device)
         optimizer.zero_grad()
         outputs = vanilla_autoencoder(inputs)
@@ -369,7 +371,7 @@ def main():
 # Call the main function and get results
 confusion_mat, all_aurocs, all_thresholds, all_train_losses, all_val_losses = main()
 
-# Función para graficar las pérdidas
+# Function to plot training and validation losses
 def plot_losses(train_losses, val_losses, class_index):
     plt.figure(figsize=(10, 5))
     plt.plot(train_losses, label='Train Loss')
@@ -380,7 +382,7 @@ def plot_losses(train_losses, val_losses, class_index):
     plt.legend()
     plt.show()
 
-# Función para graficar la matriz de confusión
+# Function to plot the confusion matrix
 def plot_confusion_matrix(confusion_mat):
     plt.figure(figsize=(10, 7))
     sns.heatmap(confusion_mat, annot=True, fmt='g', cmap='Blues', xticklabels=range(10), yticklabels=range(10))
@@ -389,7 +391,7 @@ def plot_confusion_matrix(confusion_mat):
     plt.title('Confusion Matrix')
     plt.show()
 
-# Función para graficar AUROC y umbrales
+# Function to plot AUROC and thresholds
 def plot_auroc_thresholds(aurocs, thresholds):
     plt.figure(figsize=(10, 5))
     plt.bar(range(10), aurocs, alpha=0.6, label='AUROC')
@@ -441,11 +443,12 @@ def add_noise(img):
     img_noisy = torch.clamp(img + noise, 0., 1.)
     return img_noisy
 
-# Function to train the denoising autoencoder for one epoch
+# Function to train the denoising autoencoder for one epoch with tqdm.rich
 def train_denoising_epoch(denoising_autoencoder, train_loader, criterion, optimizer):
     denoising_autoencoder.train()
     total_loss = 0
-    for inputs, _ in train_loader:
+    # Use tqdm.rich to display progress
+    for inputs, _ in tqdm(train_loader, desc="Training Denoising Epoch", leave=False):
         inputs = inputs.to(device)
         inputs_noisy = add_noise(inputs)
         optimizer.zero_grad()
@@ -580,9 +583,19 @@ class VAE(nn.Module):
         super(VAE, self).__init__()
         self.encoder = VAEEncoder(input_dim, hidden_dim, latent_dim)
         self.decoder = VAEDecoder(latent_dim, hidden_dim, input_dim)
+        # Initialize weights
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
 
     def reparameterize(self, mean, log_var):
         std = torch.exp(0.5 * log_var)
+        # Avoid extreme values in std
+        std = torch.clamp(std, min=1e-6, max=1e6)
         epsilon = torch.randn_like(std)
         return mean + epsilon * std
 
@@ -593,21 +606,29 @@ class VAE(nn.Module):
         return x_hat, mean, log_var
 
 
-def vae_loss_function(x, x_hat, mean, log_var):
+def vae_loss_function(x, x_hat, mean, log_var, beta=0.1):
     reconstruction_loss = nn.functional.mse_loss(x_hat, x, reduction='sum')
     kl_divergence = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
-    return reconstruction_loss + kl_divergence
+    # Avoid extreme values in KL divergence
+    kl_divergence = torch.clamp(kl_divergence, min=-1e6, max=1e6)
+    return reconstruction_loss + beta * kl_divergence
 
-
+# Function to train the VAE for one epoch with tqdm.rich
 def train_vae_epoch(vae, train_loader, optimizer):
     vae.train()
     total_loss = 0
-    for inputs, _ in train_loader:
+    # Use tqdm.rich to display progress
+    for inputs, _ in tqdm(train_loader, desc="Training VAE Epoch", leave=False):
         inputs = inputs.view(inputs.size(0), -1).to(device)
+        inputs = torch.clamp(inputs, 0., 1.)  # Normalize inputs to range [0, 1]
         optimizer.zero_grad()
         x_hat, mean, log_var = vae(inputs)
-        loss = vae_loss_function(inputs, x_hat, mean, log_var)
+        loss = vae_loss_function(inputs, x_hat, mean, log_var, beta=0.1)
+        if torch.isnan(loss):
+            print("NaN detected in loss! Skipping batch.")
+            continue
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)  # Gradient clipping
         optimizer.step()
         total_loss += loss.item()
     return total_loss / len(train_loader)
