@@ -583,6 +583,11 @@ def compare_images(generator, test_loader):
     Displays:
         A plot comparing 5 low-resolution, super-resolution, and high-resolution images.
     """
+
+    def denormalize(tensor):
+        # Convert image from [-1, 1] to [0, 1]
+        return tensor * 0.5 + 0.5
+
     generator.eval()
     with torch.no_grad():
         for hr_real, lr_real in test_loader:
@@ -592,19 +597,19 @@ def compare_images(generator, test_loader):
             # Display 5 low-resolution, super-resolution, and high-resolution images
             fig, axs = plt.subplots(3, 5, figsize=(15, 9))
             for i in range(5):
-                lr_image = transforms.ToPILImage()(lr_real[i].cpu().squeeze(0))
-                sr_image = transforms.ToPILImage()(sr_fake[i].cpu().squeeze(0))
-                hr_image = transforms.ToPILImage()(hr_real[i].cpu().squeeze(0))
+                lr_img = denormalize(lr_real[i].cpu()).permute(1, 2, 0).numpy()
+                sr_img = denormalize(sr_fake[i].cpu()).permute(1, 2, 0).numpy()
+                hr_img = denormalize(hr_real[i].cpu()).permute(1, 2, 0).numpy()
 
-                axs[0, i].imshow(lr_image)
+                axs[0, i].imshow(np.clip(lr_img, 0, 1))
                 axs[0, i].set_title("Low Resolution")
                 axs[0, i].axis("off")
 
-                axs[1, i].imshow(sr_image)
+                axs[1, i].imshow(np.clip(sr_img, 0, 1))
                 axs[1, i].set_title("Super Resolution")
                 axs[1, i].axis("off")
 
-                axs[2, i].imshow(hr_image)
+                axs[2, i].imshow(np.clip(hr_img, 0, 1))
                 axs[2, i].set_title("High Resolution")
                 axs[2, i].axis("off")
 
