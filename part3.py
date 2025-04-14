@@ -1,385 +1,613 @@
+# Import necessary libraries
 import os
+
+from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
-import seaborn as sns
-from PIL import Image
-from tqdm import tqdm
+from tqdm.auto import tqdm
+from math import log10
 
+from skimage.metrics import structural_similarity as ssim
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from torchvision import transforms
-from torchvision.datasets import CIFAR10
-import torchvision.transforms.functional as TF
 import torch.nn.functional as F
-from torchsummary import summary
-from torchvision.models import resnet18  # Import ResNet18
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay  # Import for confusion matrix
+from torchvision import datasets, transforms
+from torchvision import models
+from torch.utils.data import DataLoader
 
 torch.set_float32_matmul_precision('medium')
 
-# CIFAR10 images are already 32x32, so no resizing is needed. 
-# We normalize the images to have a mean of 0.5 and a standard deviation of 0.5 for each channel.
-transform = transforms.Compose([
-    transforms.Resize((32, 32)),
+# Set matrix multiplication precision to medium for better performance
+torch.set_float32_matmul_precision('medium')
+
+# Display PyTorch version, CUDA version, and cuDNN version
+print("PyTorch Version:", torch.__version__)
+
+cuda_version = torch.version.cuda
+print("CUDA Version:", cuda_version)
+
+cudnn_version = torch.backends.cudnn.version()
+print("cuDNN Version:", cudnn_version)
+
+# Check GPU availability
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print("Num GPUs Available:", torch.cuda.device_count())
+
+# Define transformations for high-resolution (HR) and low-resolution (LR) images
+transform_hr = transforms.Compose([
+    transforms.Resize((128, 128)),  # Resize to 128x128
     transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))  # CIFAR10 mean/std
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalize to [-1, 1]
 ])
 
-kwargs = {'num_workers': 8, 'pin_memory': True}  # DataLoader optimization for better performance on CUDA.
+transform_lr = transforms.Compose([
+    transforms.Resize((64, 64)),  # Resize to 64x64
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalize to [-1, 1]
+])
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# Define the CelebA dataset class
+class CelebADataset(torch.utils.data.Dataset):
+    def __init__(self, image_paths, transform_hr=None, transform_lr=None):
+        """
+        Custom dataset class for loading CelebA images.
 
-# Custom dataset class to filter CIFAR10 images by a specific class.
-class OneClassDatasetCIFAR10(CIFAR10):
-    def __init__(self, root_dir, real_class=1, transform=None, train=True, download=True):
-        super().__init__(root=root_dir, transform=transform, train=train, download=download)
-        self.real_class = real_class
-        self.samples = []
-        for i in range(len(self.data)):
-            if self.targets[i] == self.real_class:
-                self.samples.append((self.data[i], self.targets[i]))
-
-    def __len__(self):
-        return len(self.samples)
+        Args:
+            image_paths (list): List of image file paths.
+            transform_hr (callable, optional): Transformation for high-resolution images.
+            transform_lr (callable, optional): Transformation for low-resolution images.
+        """
+        self.image_paths = image_paths  # List of image file paths
+        self.transform_hr = transform_hr  # Transformation for high-resolution images
+        self.transform_lr = transform_lr  # Transformation for low-resolution images
 
     def __getitem__(self, idx):
-        data = self.samples[idx]
-        image = TF.to_tensor(data[0])
-        if self.transform:
-            image = self.transform(image)
-        label = 0  # Dummy label since the autoencoder does not use labels.
-        return image, label
+        """
+        Retrieve a high-resolution and low-resolution image pair.
 
-# Encoder for the VAE using ResNet18 architecture
-class VAE_Encoder(nn.Module):
-    def __init__(self, latent_dim=128):
-        super(VAE_Encoder, self).__init__()
-        # Load ResNet18 without pre-trained weights
-        resnet = resnet18(weights=None)
-        # Remove the fully connected layer (fc) to use it as a feature extractor
-        self.feature_extractor = nn.Sequential(*list(resnet.children())[:-1])  # Remove the last fc layer
-        self.flatten = nn.Flatten()  # Flatten the output of the feature extractor
-        self.fc_mean = nn.Linear(512, latent_dim)  # Map to latent space (mean)
-        self.fc_logvar = nn.Linear(512, latent_dim)  # Map to latent space (log variance)
+        Args:
+            idx (int): Index of the image to retrieve.
 
-    def forward(self, x):
-        x = self.feature_extractor(x)  # Extract features
-        x = self.flatten(x)  # Flatten the features
-        mean = self.fc_mean(x)  # Compute mean
-        logvar = self.fc_logvar(x)  # Compute log variance
-        return mean, logvar
-
-# Decoder for the VAE using transposed convolutional layers. It reconstructs the image from the latent space
-# back to the original 32x32 resolution with 3 channels.
-class VAE_Decoder(nn.Module):
-    def __init__(self, latent_dim=256):  # Adjust latent space size
-        super(VAE_Decoder, self).__init__()
-        self.fc = nn.Linear(latent_dim, 2048)  # Increase decoder capacity
-        self.decoder = nn.Sequential(
-            nn.Unflatten(1, (512, 2, 2)),
-            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(256),
-            nn.SiLU(),
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.SiLU(),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.SiLU(),
-            nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1),
-            nn.Sigmoid()
-        )
-
-    def forward(self, z):
-        x = self.fc(z)
-        x = self.decoder(x)
-        return x
-
-# Variational Autoencoder (VAE) combining the encoder and decoder. It includes the reparameterization trick
-# to sample from the latent space.
-class VAE(nn.Module):
-    def __init__(self, latent_dim=128):
-        super(VAE, self).__init__()
-        self.encoder = VAE_Encoder(latent_dim)
-        self.decoder = VAE_Decoder(latent_dim)
-
-    def reparameterize(self, mean, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mean + eps * std
-
-    def forward(self, x):
-        mean, logvar = self.encoder(x)
-        z = self.reparameterize(mean, logvar)
-        x_hat = self.decoder(z)
-        return x_hat, mean, logvar
-
-# Loss function for the VAE
-def vae_loss_function(x, x_hat, mean, log_var, beta=0.1):
-    reconstruction_loss = nn.functional.mse_loss(x_hat, x, reduction='mean')  # Reconstruction loss
-    kl_divergence = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())  # KL divergence
-    kl_divergence = torch.clamp(kl_divergence, min=-1e6, max=1e6)  # Clamp to avoid numerical issues
-    return reconstruction_loss + beta * kl_divergence / x.size(0)  # Normalize KL by batch size
-
-# Function to train the VAE for one epoch with tqdm
-def train_vae_epoch(vae, train_loader, optimizer):
-    vae.train()
-    total_loss = 0
-    # Use tqdm to display progress
-    for inputs, _ in tqdm(train_loader, desc="Training VAE Epoch", leave=False):
-        inputs = inputs.to(device)  # Move inputs to device
-        inputs = torch.clamp(inputs, 0., 1.)  # Normalize inputs to range [0, 1]
-        optimizer.zero_grad()
-        x_hat, mean, log_var = vae(inputs)
-        loss = vae_loss_function(inputs, x_hat, mean, log_var, beta=0.1)
-        if torch.isnan(loss):
-            print("NaN detected in loss! Skipping batch.")
-            continue
-        loss.backward()
+        Returns:
+            tuple: High-resolution and low-resolution images as tensors.
+        """
+        # Open the image at the given index
+        img_path = self.image_paths[idx]
+        img = Image.open(img_path).convert('RGB')  # Open image and convert to RGB
         
-        # Log gradients for debugging
-        for name, param in vae.named_parameters():
-            if param.grad is not None:
-                print(f"Gradient for {name}: {param.grad.norm().item()}")
+        # Apply transformations for HR and LR images (convert to tensor)
+        hr_img = self.transform_hr(img) if self.transform_hr else transforms.ToTensor()(img)
+        lr_img = self.transform_lr(img) if self.transform_lr else transforms.ToTensor()(img)
+        
+        return hr_img, lr_img  # Return HR and LR images as tensors
 
-        torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)  # Gradient clipping
-        optimizer.step()
-        total_loss += loss.item()
-    return total_loss / len(train_loader)
+    def __len__(self):
+        """
+        Get the total number of images in the dataset.
 
-# Function to evaluate the VAE on the validation set
-def evaluate_vae(vae, val_loader):
-    vae.eval()
-    total_loss = 0
-    with torch.no_grad():
-        for inputs, _ in val_loader:
-            inputs = inputs.to(device)  # Move inputs to device
-            x_hat, mean, log_var = vae(inputs)
-            loss = vae_loss_function(inputs, x_hat, mean, log_var)
-            total_loss += loss.item()
-    return total_loss / len(val_loader)
+        Returns:
+            int: Total number of images.
+        """
+        return len(self.image_paths)
 
-# Function to test the VAE for anomaly detection
-def test_vae(vae, test_loader, threshold):
-    vae.eval()
-    anomalies = []
-    with torch.no_grad():
-        for inputs, _ in test_loader:
-            inputs = inputs.to(device)  # Move inputs to device
-            x_hat, mean, log_var = vae(inputs)
-            z = vae.reparameterize(mean, log_var)
-            distances = [calculate_mahalanobis_distance(mean[i], torch.eye(mean.size(1)).to(device), z[i]) for i in range(z.size(0))]
-            anomalies.extend([d > threshold for d in distances])
-    return anomalies
+# Split dataset into train and test sets
+def split_dataset(root, test_ratio=0.2):
+    """
+    Split the dataset into training and testing sets.
 
-# Function to calculate Mahalanobis distance
-def calculate_mahalanobis_distance(mean, covariance, x):
-    diff = x - mean
-    inv_covariance = torch.linalg.inv(covariance)
-    distance = torch.sqrt(torch.mm(torch.mm(diff.unsqueeze(0), inv_covariance), diff.unsqueeze(1)))
-    return distance.item()
+    Args:
+        root (str): Path to the dataset directory containing images.
+        test_ratio (float): Proportion of the dataset to use for testing.
 
-# Main function to train the VAE for all classes
-def main_vae():
-    latent_dim = 256  # Latent space size
-    num_epochs = 100  # Number of epochs
-    learning_rate = 1e-3
+    Returns:
+        tuple: Paths for training and testing datasets.
+    """
+    image_paths = [os.path.join(root, img) for img in os.listdir(root) if img.endswith('.jpg')]
+    split_idx = int(len(image_paths) * (1 - test_ratio))
+    train_paths = image_paths[:split_idx]
+    test_paths = image_paths[split_idx:]
+    return train_paths, test_paths
 
-    vae = VAE(latent_dim).to(device)  # Initialize VAE
+# Paths to the dataset
+dataset_root = './data/celeba'
+train_paths, test_paths = split_dataset(dataset_root)
 
-    # Display the architecture of the model
-    summary(vae, input_size=(3, 32, 32))  # Input size matches CIFAR10 images
+# Create train and test datasets
+train_dataset = CelebADataset(train_paths, transform_hr=transform_hr, transform_lr=transform_lr)
+test_dataset = CelebADataset(test_paths, transform_hr=transform_hr, transform_lr=transform_lr)
 
-    optimizer = torch.optim.AdamW(vae.parameters(), lr=learning_rate)  # Use AdamW optimizer
+# Display the number of images in the training and testing datasets
+print(f"Number of images in the training dataset: {len(train_dataset)}")
+print(f"Number of images in the testing dataset: {len(test_dataset)}")
 
-    all_train_losses = []
-    all_val_losses = []
+# Create DataLoaders for train and test datasets
+train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+test_dataloader = DataLoader(test_dataset, batch_size=16, shuffle=False)
 
-    for real_class in range(10):
-        print(f"Training VAE for class {real_class}...")
+def show_images(images_real, images_transformed, ncols=5, nrows=2):
+    def denormalize(img):
+        """
+        Denormalizes an image from the range [-1, 1] to the range [0, 1].
+        """
+        return (img * 0.5) + 0.5  # Reverse normalization
 
-        train_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=True, download=True)
-        val_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=False, download=True)
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(15, 6))
+    axes = axes.flatten()
 
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, **kwargs)
-        val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, **kwargs)
+    for i in range(ncols * nrows):
+        if i < 10:
+            img = denormalize(images_real[i]).numpy().transpose(1, 2, 0)  # Denormalize and convert to HWC
+        else:
+            img = denormalize(images_transformed[i - 10]).numpy().transpose(1, 2, 0)  # Denormalize and convert to HWC
+        
+        axes[i].imshow(img)
+        axes[i].axis('off')
 
-        train_losses = []
-        val_losses = []
-
-        for epoch in range(num_epochs):
-            train_loss = train_vae_epoch(vae, train_loader, optimizer)
-            val_loss = evaluate_vae(vae, val_loader)
-            train_losses.append(train_loss)
-            val_losses.append(val_loss)
-            print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-
-        all_train_losses.append(train_losses)
-        all_val_losses.append(val_losses)
-
-        # Save the trained model
-        torch.save(vae.state_dict(), f'models/vae/vae_class_{real_class}_weights.pth')
-
-    return all_train_losses, all_val_losses
-
-
-# Call the main function for VAE
-all_train_losses, all_val_losses = main_vae()
-
-# Example usage of test_vae
-def main_vae_with_test():
-    latent_dim = 256  # Latent space size
-    num_epochs = 100  # Number of epochs
-    learning_rate = 1e-3
-    threshold = 5.0  # Example threshold for Mahalanobis distance
-
-    vae = VAE(latent_dim).to(device)  # Initialize VAE
-
-    # Display the architecture of the model
-    summary(vae, input_size=(3, 32, 32))  # Input size matches CIFAR10 images
-
-    optimizer = torch.optim.AdamW(vae.parameters(), lr=learning_rate)  # Use AdamW optimizer
-
-    all_train_losses = []
-    all_val_losses = []
-
-    for real_class in range(10):
-        print(f"Training VAE for class {real_class}...")
-
-        train_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=True, download=True)
-        val_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=False, download=True)
-        test_dataset = CIFAR10(root='data', train=False, transform=transform, download=True)  # Full test dataset
-
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, **kwargs)
-        val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, **kwargs)
-        test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, **kwargs)
-
-        train_losses = []
-        val_losses = []
-
-        for epoch in range(num_epochs):
-            train_loss = train_vae_epoch(vae, train_loader, optimizer)
-            val_loss = evaluate_vae(vae, val_loader)
-            train_losses.append(train_loss)
-            val_losses.append(val_loss)
-            print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-
-        all_train_losses.append(train_losses)
-        all_val_losses.append(val_losses)
-
-        # Save the trained model
-        torch.save(vae.state_dict(), f'models/vae/vae_class_{real_class}_weights.pth')
-
-        # Test the VAE on the test dataset
-        print(f"Testing VAE for class {real_class}...")
-        anomalies = test_vae(vae, test_loader, threshold)
-        print(f"Anomalies detected for class {real_class}: {sum(anomalies)} out of {len(anomalies)}")
-
-    return all_train_losses, all_val_losses
-
-# Call the main function with testing
-all_train_losses, all_val_losses = main_vae_with_test()
-
-# Function to plot training and validation losses for each class in separate plots
-def plot_losses_per_class_separately(all_train_losses, all_val_losses):
-    num_classes = len(all_train_losses)
-    for class_index in range(num_classes):
-        plt.figure(figsize=(10, 5))
-        plt.plot(all_train_losses[class_index], label='Train Loss')
-        plt.plot(all_val_losses[class_index], label='Validation Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title(f'Training and Validation Losses for Class {class_index}')
-        plt.legend()
-        plt.show()
-
-# Generate separate plots for losses after training
-plot_losses_per_class_separately(all_train_losses, all_val_losses)
-
-# Function to visualize the reconstruction of an image by the model
-def visualize_reconstruction(vae, dataset, class_index):
-    vae.eval()
-    with torch.no_grad():
-        # Select a random image from the dataset of the given class
-        image, _ = dataset[np.random.randint(len(dataset))]
-        image = image.unsqueeze(0).to(device)  # Add batch dimension and move to device
-        reconstructed, _, _ = vae(image)
-
-        # Convert tensors to numpy arrays for visualization
-        original_image = image.squeeze(0).cpu().numpy().transpose(1, 2, 0) * 0.5 + 0.5  # Denormalize
-        reconstructed_image = reconstructed.squeeze(0).cpu().numpy().transpose(1, 2, 0) * 0.5 + 0.5  # Denormalize
-
-        # Plot original and reconstructed images
-        plt.figure(figsize=(8, 4))
-        plt.subplot(1, 2, 1)
-        plt.imshow(original_image)
-        plt.title(f'Original Image (Class {class_index})')
-        plt.axis('off')
-
-        plt.subplot(1, 2, 2)
-        plt.imshow(reconstructed_image)
-        plt.title(f'Reconstructed Image (Class {class_index})')
-        plt.axis('off')
-
-        plt.show()
-
-
-
-# Visualize reconstruction for each class
-for class_index in range(10):
-    print(f"Visualizing reconstruction for class {class_index}...")
-    # Load the corresponding dataset and model for the class
-    val_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=class_index, transform=transform, train=False, download=True)
-    vae = VAE(latent_dim=128).to(device)
-    vae.load_state_dict(torch.load(f'models/vae/vae_class_{class_index}_weights.pth'))
-    visualize_reconstruction(vae, val_dataset, class_index)
-
-# Function to generate a confusion matrix for anomaly detection
-def generate_confusion_matrix(vae, real_class, threshold, transform):
-    vae.eval()
-    all_labels = []
-    all_predictions = []
-
-    # Load datasets for the real class and other classes
-    real_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=False, download=True)
-    other_dataset = [OneClassDatasetCIFAR10(root_dir='data', real_class=i, transform=transform, train=False, download=True)
-                     for i in range(10) if i != real_class]
-
-    # Evaluate real class (normal samples)
-    with torch.no_grad():
-        for image, _ in real_dataset:
-            image = image.unsqueeze(0).to(device)
-            x_hat, mean, log_var = vae(image)
-            z = vae.reparameterize(mean, log_var)
-            distance = calculate_mahalanobis_distance(mean[0], torch.eye(mean.size(1)).to(device), z[0])
-            all_labels.append(0)  # Label 0 for normal
-            all_predictions.append(1 if distance > threshold else 0)
-
-    # Evaluate other classes (anomalous samples)
-    with torch.no_grad():
-        for dataset in other_dataset:
-            for image, _ in dataset:
-                image = image.unsqueeze(0).to(device)
-                x_hat, mean, log_var = vae(image)
-                z = vae.reparameterize(mean, log_var)
-                distance = calculate_mahalanobis_distance(mean[0], torch.eye(mean.size(1)).to(device), z[0])
-                all_labels.append(1)  # Label 1 for anomaly
-                all_predictions.append(1 if distance > threshold else 0)
-
-    # Generate confusion matrix
-    cm = confusion_matrix(all_labels, all_predictions, labels=[0, 1])
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Normal", "Anomaly"])
-    disp.plot(cmap=plt.cm.Blues)
-    plt.title(f"Confusion Matrix for Class {real_class}")
+        # Adjust axis ticks
+        axes[i].xaxis.set_major_locator(MaxNLocator(integer=True))  # Integer ticks on x-axis
+        axes[i].yaxis.set_major_locator(MaxNLocator(integer=True))  # Integer ticks on y-axis
+    
+    plt.tight_layout()
     plt.show()
 
-# Generate confusion matrices for all classes
-threshold = 5.0  # Example threshold for Mahalanobis distance
-for class_index in range(10):
-    print(f"Generating confusion matrix for class {class_index}...")
-    vae = VAE(latent_dim=128).to(device)
-    vae.load_state_dict(torch.load(f'models/vae/vae_class_{class_index}_weights.pth'))
-    generate_confusion_matrix(vae, class_index, threshold, transform)
+# Define the Residual Block
+class ResidualBlock(nn.Module):
+    """
+    Residual Block used in the Generator model.
+
+    Args:
+        channels (int): Number of input and output channels for the block.
+    """
+    def __init__(self, channels):
+        """
+        Initialize the Residual Block.
+
+        Args:
+            channels: The number of input and output channels for the block.
+        """
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+            nn.SiLU(),  
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+        )
+
+    def forward(self, x):
+        """
+        Forward pass for the Residual Block.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Output tensor with residual connection.
+        """
+        # Return the input with the residual connection added to the output of the block
+        return x + self.layers(x)
+
+# Define the Generator (SRResNet)
+class Generator(nn.Module):
+    """
+    Generator model for Super-Resolution (SRResNet).
+
+    Args:
+        base_channels (int): Number of channels in the first convolutional layer.
+        n_ps_blocks (int): Number of PixelShuffle blocks.
+        n_res_blocks (int): Number of Residual blocks.
+    """
+    def __init__(self, base_channels=64, n_ps_blocks=2, n_res_blocks=16):
+        """
+        Initialize the Generator (SRResNet) model.
+
+        Args:
+            base_channels: The number of channels in the first convolutional layer.
+            n_ps_blocks: The number of PixelShuffle blocks.
+            n_res_blocks: The number of Residual blocks.
+        """
+        super().__init__()
+        self.in_layer = nn.Sequential(
+            nn.Conv2d(3, base_channels, kernel_size=9, padding=4),
+            nn.SiLU(),  
+        )
+        res_blocks = [ResidualBlock(base_channels) for _ in range(n_res_blocks)]
+        res_blocks += [
+            nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(base_channels),
+        ]
+        self.res_blocks = nn.Sequential(*res_blocks)
+        ps_blocks = []
+        for _ in range(n_ps_blocks):
+            ps_blocks += [
+                nn.Conv2d(base_channels, 4 * base_channels, kernel_size=3, padding=1),
+                nn.PixelShuffle(2),
+                nn.SiLU(),  
+            ]
+        self.ps_blocks = nn.Sequential(*ps_blocks)
+        self.out_layer = nn.Sequential(
+            nn.Conv2d(base_channels, 3, kernel_size=9, padding=4),
+            nn.Tanh(),
+        )
+
+    def forward(self, x):
+        """
+        Forward pass for the Generator model.
+
+        Args:
+            x (torch.Tensor): Low-resolution input tensor.
+
+        Returns:
+            torch.Tensor: High-resolution output tensor.
+        """
+        x_res = self.in_layer(x)
+        x = x_res + self.res_blocks(x_res)
+        x = self.ps_blocks(x)
+        x = self.out_layer(x)
+        return x
+
+# Define the Discriminator
+class Discriminator(nn.Module):
+    """
+    Discriminator model for distinguishing real and fake high-resolution images.
+
+    Args:
+        base_channels (int): Number of channels in the first convolutional layer.
+        n_blocks (int): Number of convolutional blocks.
+    """
+    def __init__(self, base_channels=64, n_blocks=3):
+        super().__init__()
+        self.blocks = [
+            nn.Conv2d(3, base_channels, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=1, stride=2),
+            nn.BatchNorm2d(base_channels),
+            nn.LeakyReLU(0.2, inplace=True),
+        ]
+        cur_channels = base_channels
+        for _ in range(n_blocks):
+            self.blocks += [
+                nn.Conv2d(cur_channels, 2 * cur_channels, kernel_size=3, padding=1),
+                nn.BatchNorm2d(2 * cur_channels),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(2 * cur_channels, 2 * cur_channels, kernel_size=3, padding=1, stride=2),
+                nn.BatchNorm2d(2 * cur_channels),
+                nn.LeakyReLU(0.2, inplace=True),
+            ]
+            cur_channels *= 2
+        self.blocks += [
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(cur_channels, 2 * cur_channels, kernel_size=1, padding=0),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(2 * cur_channels, 1, kernel_size=1, padding=0),
+            nn.Flatten(),
+        ]
+        self.layers = nn.Sequential(*self.blocks)
+
+    def forward(self, x):
+        """
+        Forward pass for the Discriminator model.
+
+        Args:
+            x (torch.Tensor): Input tensor (image).
+
+        Returns:
+            torch.Tensor: Output tensor (real or fake prediction).
+        """
+        return self.layers(x)
+
+# Define the Loss class
+class Loss(nn.Module):
+    """
+    Loss function for training the SRGAN model.
+
+    Args:
+        device (str): Device to run the loss calculations ('cuda' or 'cpu').
+    """
+    def __init__(self, device='cuda'):
+        super().__init__()
+        vgg = models.vgg19(weights=models.VGG19_Weights.DEFAULT).to(device)
+        self.vgg = nn.Sequential(*list(vgg.features)[:-1]).eval()
+        for p in self.vgg.parameters():
+            p.requires_grad = False
+
+    @staticmethod
+    def img_loss(x_real, x_fake):
+        """
+        Calculate image reconstruction loss (MSE).
+
+        Args:
+            x_real (torch.Tensor): Real high-resolution image.
+            x_fake (torch.Tensor): Generated high-resolution image.
+
+        Returns:
+            torch.Tensor: MSE loss.
+        """
+        return F.mse_loss(x_real, x_fake)
+
+    def adv_loss(self, x, is_real):
+        """
+        Calculate adversarial loss.
+
+        Args:
+            x (torch.Tensor): Discriminator predictions.
+            is_real (bool): Whether the predictions are for real images.
+
+        Returns:
+            torch.Tensor: Adversarial loss.
+        """
+        target = torch.zeros_like(x) if is_real else torch.ones_like(x)
+        return F.binary_cross_entropy_with_logits(x, target)
+
+    def vgg_loss(self, x_real, x_fake):
+        """
+        Calculate perceptual loss using VGG19 features.
+
+        Args:
+            x_real (torch.Tensor): Real high-resolution image.
+            x_fake (torch.Tensor): Generated high-resolution image.
+
+        Returns:
+            torch.Tensor: Perceptual loss.
+        """
+        return F.mse_loss(self.vgg(x_real), self.vgg(x_fake))
+
+    def forward(self, generator, discriminator, hr_real, lr_real):
+        """
+        Calculate generator and discriminator losses.
+
+        Args:
+            generator (nn.Module): Generator model.
+            discriminator (nn.Module): Discriminator model.
+            hr_real (torch.Tensor): Real high-resolution images.
+            lr_real (torch.Tensor): Low-resolution images.
+
+        Returns:
+            tuple: Generator loss, discriminator loss, and generated high-resolution images.
+        """
+        hr_fake = generator(lr_real)
+        fake_preds_for_g = discriminator(hr_fake)
+        fake_preds_for_d = discriminator(hr_fake.detach())
+        real_preds_for_d = discriminator(hr_real.detach())
+        g_loss = (
+            0.001 * self.adv_loss(fake_preds_for_g, False) +
+            0.006 * self.vgg_loss(hr_real, hr_fake) +
+            self.img_loss(hr_real, hr_fake)
+        )
+        d_loss = 0.5 * (
+            self.adv_loss(real_preds_for_d, True) +
+            self.adv_loss(fake_preds_for_d, False)
+        )
+        return g_loss, d_loss, hr_fake
+
+# Function to calculate PSNR (Peak Signal-to-Noise Ratio)
+def calculate_psnr(img1, img2, max_value=1.0):
+    """
+    Calculate Peak Signal-to-Noise Ratio (PSNR) between two images.
+
+    Args:
+        img1 (torch.Tensor): First image tensor.
+        img2 (torch.Tensor): Second image tensor.
+        max_value (float): Maximum pixel value (default: 1.0).
+
+    Returns:
+        float: PSNR value in decibels (dB).
+    """
+    # Convert tensor images to numpy arrays and calculate MSE
+    img1 = img1.detach().cpu().numpy()  # Detach from computation graph and convert to numpy
+    img2 = img2.detach().cpu().numpy()  # Detach from computation graph and convert to numpy
+    mse = np.mean((img1 - img2) ** 2)
+    
+    # Avoid division by zero
+    if mse == 0:
+        return 100  # If MSE is 0, return a PSNR of 100
+    psnr = 10 * log10((max_value ** 2) / mse)  # Calculate PSNR
+    return psnr
+
+# Function to calculate SSIM (Structural Similarity Index)
+def calculate_ssim(img1, img2, win_size=3, data_range=2):
+    """
+    Calculate Structural Similarity Index (SSIM) between two images.
+
+    Args:
+        img1 (torch.Tensor): First image tensor.
+        img2 (torch.Tensor): Second image tensor.
+        win_size (int): Window size for SSIM calculation (default: 3).
+        data_range (float): Data range of the images (default: 2).
+
+    Returns:
+        float: SSIM value.
+    """
+    # Convert tensor images to numpy arrays
+    img1 = img1.detach().cpu().numpy().transpose(1, 2, 0)  # Convert to HWC format for SSIM
+    img2 = img2.detach().cpu().numpy().transpose(1, 2, 0)
+    
+    # Compute SSIM with a smaller window size (e.g., 3 or 5)
+    return ssim(img1, img2, win_size=win_size, multichannel=True, data_range=data_range)
+
+# Define the training function
+def train(generator, discriminator, dataloader, device, lr=1e-4, total_steps=1e4, display_step=1000, patience=5, min_improvement=0.1, warmup_steps=5000):
+    """
+    Train the Generator and Discriminator models using the given dataloader.
+
+    Args:
+        generator (nn.Module): The generator model.
+        discriminator (nn.Module): The discriminator model.
+        dataloader (DataLoader): DataLoader for the training dataset.
+        device (str): Device to run the computations ('cuda' or 'cpu').
+        lr (float, optional): Learning rate for the optimizers. Default is 1e-4.
+        total_steps (int, optional): Total number of training steps. Default is 1e4.
+        display_step (int, optional): Step interval for displaying metrics. Default is 1000.
+        patience (int, optional): Number of steps without improvement in PSNR to trigger early stopping. Default is 5.
+        min_improvement (float, optional): Minimum PSNR improvement required to reset early stopping. Default is 0.1.
+        warmup_steps (int, optional): Number of steps to warm up before early stopping is considered. Default is 5000.
+
+    Returns:
+        None
+    """
+
+    generator = generator.to(device).train()
+    discriminator = discriminator.to(device).train()
+    loss_fn = Loss(device=device)
+
+    g_optimizer = torch.optim.AdamW(generator.parameters(), lr=lr)
+    d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=lr)
+
+    cur_step = 0
+    mean_g_loss = 0.0
+    mean_d_loss = 0.0
+    best_psnr = -float('inf')
+    patience_counter = 0
+
+    pbar = tqdm(total=int(total_steps), desc="Training Steps")
+
+    while cur_step < total_steps:
+        for hr_real, lr_real in dataloader:
+            if cur_step >= total_steps:
+                break
+
+            hr_real = hr_real.to(device)
+            lr_real = lr_real.to(device)
+
+            # Forward + backward
+            g_loss, d_loss, hr_fake = loss_fn(generator, discriminator, hr_real, lr_real)
+
+            g_optimizer.zero_grad()
+            g_loss.backward()
+            g_optimizer.step()
+
+            d_optimizer.zero_grad()
+            d_loss.backward()
+            d_optimizer.step()
+
+            mean_g_loss += g_loss.item() / display_step
+            mean_d_loss += d_loss.item() / display_step
+
+            # Métricas de validación
+            psnr_value = calculate_psnr(hr_real[0], hr_fake[0])
+            ssim_value = calculate_ssim(hr_real[0], hr_fake[0], win_size=3, data_range=2)
+
+            # Mostrar durante warmup también
+            if cur_step % display_step == 0:
+                tqdm.write(f'Step {cur_step}: G_loss: {mean_g_loss:.5f}, D_loss: {mean_d_loss:.5f}')
+                tqdm.write(f'PSNR: {psnr_value:.2f} dB, SSIM: {ssim_value:.4f}')
+                mean_g_loss = 0.0
+                mean_d_loss = 0.0
+
+            # Early stopping
+            if cur_step >= warmup_steps:
+                if psnr_value > best_psnr + min_improvement:
+                    best_psnr = psnr_value
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+                if patience_counter >= patience:
+                    tqdm.write(f"🛑 Early stopping at step {cur_step} due to no improvement in PSNR.")
+                    return
+
+            cur_step += 1
+            pbar.update(1)
+
+    pbar.close()
+
+# Initialize and train the SRGAN
+generator = Generator(n_res_blocks=16, n_ps_blocks=2).to(device)
+discriminator = Discriminator(n_blocks=1, base_channels=8).to(device)
+
+train(
+    generator,  # Your generator model
+    discriminator,  # Your discriminator model
+    train_dataloader,  # Your dataloader for the training dataset
+    device,  # The device ('cuda' or 'cpu')
+    lr=1e-4,  # Learning rate
+    total_steps=1e4,  # Total steps to train
+    display_step=1000,  # Display metrics every 1000 steps
+    patience=5,  # Early stopping patience (number of steps without improvement in PSNR)
+    min_improvement=0.1,  # Minimum PSNR improvement required to reset early stopping
+    warmup_steps=5000  # Number of steps to warm up before early stopping is considered
+)
+
+# Save the trained models
+torch.save(generator.state_dict(), 'models/srgan/srgenerator.pth')
+torch.save(discriminator.state_dict(), 'models/srgan/srdiscriminator.pth')
+
+
+generator = Generator().to(device)
+generator.load_state_dict(torch.load('models/srgan/srgenerator.pth', map_location=device))
+generator.eval()
+
+def evaluate(generator, test_loader, device):
+    """
+    Evaluate the generator model on the test dataset.
+
+    Args:
+        generator (nn.Module): The generator model.
+        test_loader (DataLoader): DataLoader for the test dataset.
+        device (str): Device to run the computations ('cuda' or 'cpu').
+
+    Returns:
+        tuple: Average PSNR and SSIM values across the test dataset.
+    """
+    generator.eval()
+    avg_psnr = 0.0
+    avg_ssim = 0.0
+    with torch.no_grad():
+        for hr_real, lr_real in tqdm(test_loader, desc="Evaluating"):
+            hr_real = hr_real.to(device)
+            lr_real = lr_real.to(device)
+            hr_fake = generator(lr_real)
+
+            # Calculate PSNR and SSIM for the first image in the batch
+            psnr_value = calculate_psnr(hr_real[0], hr_fake[0])
+            ssim_value = calculate_ssim(hr_real[0], hr_fake[0], win_size=3, data_range=2)
+
+            avg_psnr += psnr_value
+            avg_ssim += ssim_value
+
+    total = len(test_loader)
+    avg_psnr /= total
+    avg_ssim /= total
+    print(f"\nEvaluation Results — PSNR: {avg_psnr:.2f} dB | SSIM: {avg_ssim:.4f}")
+    return avg_psnr, avg_ssim
+
+def compare_images(generator, test_loader):
+    """
+    Compare low-resolution, super-resolution, and high-resolution images.
+
+    Args:
+        generator (nn.Module): The generator model.
+        test_loader (DataLoader): DataLoader for the test dataset.
+
+    Displays:
+        A plot comparing 5 low-resolution, super-resolution, and high-resolution images.
+    """
+    generator.eval()
+    with torch.no_grad():
+        for hr_real, lr_real in test_loader:
+            lr_real = lr_real.to(device)
+            sr_fake = generator(lr_real)
+
+            # Display 5 low-resolution, super-resolution, and high-resolution images
+            fig, axs = plt.subplots(3, 5, figsize=(15, 9))
+            for i in range(5):
+                lr_image = transforms.ToPILImage()(lr_real[i].cpu().squeeze(0))
+                sr_image = transforms.ToPILImage()(sr_fake[i].cpu().squeeze(0))
+                hr_image = transforms.ToPILImage()(hr_real[i].cpu().squeeze(0))
+
+                axs[0, i].imshow(lr_image)
+                axs[0, i].set_title("Low Resolution")
+                axs[0, i].axis("off")
+
+                axs[1, i].imshow(sr_image)
+                axs[1, i].set_title("Super Resolution")
+                axs[1, i].axis("off")
+
+                axs[2, i].imshow(hr_image)
+                axs[2, i].set_title("High Resolution")
+                axs[2, i].axis("off")
+
+            plt.tight_layout()
+            plt.show()
+            break
