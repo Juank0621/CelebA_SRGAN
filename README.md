@@ -2,7 +2,7 @@
   <img src="images/personal_logo.png" alt="Logo"/>
 </p>
 
-<h1 align="center">Generative AI + Anomaly Detection on CIFAR-10</h1>
+<h1 align="center">Super-Resolution GAN on CelebA Dataset</h1>
 
 <br>
 
