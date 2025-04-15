@@ -76,7 +76,7 @@ pip install -r requirements.txt
 
 ## Files Overview
 
-### `part3.py`
+#### `part3.py`
 This script contains the main implementation of the SRGAN model, including:
 - Dataset preparation (`CelebADataset` class)
 - Model definitions (`Generator`, `Discriminator`, `ResidualBlock`)
