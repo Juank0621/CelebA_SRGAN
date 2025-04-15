@@ -16,7 +16,6 @@ from torchvision import datasets, transforms
 from torchvision import models
 from torch.utils.data import DataLoader
 
-torch.set_float32_matmul_precision('medium')
 
 # Set matrix multiplication precision to medium for better performance
 torch.set_float32_matmul_precision('medium')
@@ -33,6 +32,9 @@ print("cuDNN Version:", cudnn_version)
 # Check GPU availability
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print("Num GPUs Available:", torch.cuda.device_count())
+
+kwargs = {'num_workers': 8, 'pin_memory': True} # DataLoader optimization for better performance on CUDA.
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Define transformations for high-resolution (HR) and low-resolution (LR) images
 transform_hr = transforms.Compose([
@@ -122,8 +124,8 @@ print(f"Number of images in the training dataset: {len(train_dataset)}")
 print(f"Number of images in the testing dataset: {len(test_dataset)}")
 
 # Create DataLoaders for train and test datasets
-train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-test_dataloader = DataLoader(test_dataset, batch_size=16, shuffle=False)
+train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True, **kwargs)
+test_dataloader = DataLoader(test_dataset, batch_size=16, shuffle=False, **kwargs)
 
 def show_images(images_real, images_transformed, ncols=5, nrows=2):
     def denormalize(img):
@@ -198,7 +200,7 @@ class Generator(nn.Module):
         n_ps_blocks (int): Number of PixelShuffle blocks.
         n_res_blocks (int): Number of Residual blocks.
     """
-    def __init__(self, base_channels=64, n_ps_blocks=2, n_res_blocks=16):
+    def __init__(self, base_channels=64, n_ps_blocks=1, n_res_blocks=16):
         """
         Initialize the Generator (SRResNet) model.
 
@@ -256,7 +258,7 @@ class Discriminator(nn.Module):
         base_channels (int): Number of channels in the first convolutional layer.
         n_blocks (int): Number of convolutional blocks.
     """
-    def __init__(self, base_channels=64, n_blocks=3):
+    def __init__(self, base_channels=64, n_blocks=6):
         super().__init__()
         self.blocks = [
             nn.Conv2d(3, base_channels, kernel_size=3, padding=1),
@@ -426,41 +428,59 @@ def calculate_ssim(img1, img2, win_size=3, data_range=2):
     # Compute SSIM with a smaller window size (e.g., 3 or 5)
     return ssim(img1, img2, win_size=win_size, multichannel=True, data_range=data_range)
 
-# Define the training function
-def train(generator, discriminator, dataloader, device, lr=1e-4, total_steps=1e4, display_step=1000, patience=5, min_improvement=0.1, warmup_steps=5000):
+def show_tensor_images(image_tensor, num_images=4, title=None):
     """
-    Train the Generator and Discriminator models using the given dataloader.
+    Displays a grid of images from a tensor batch in [-1, 1] range.
+
+    Args:
+        image_tensor (torch.Tensor): Batch of images (B, C, H, W) normalized to [-1, 1].
+        num_images (int): Number of images to display (default: 4).
+        title (str, optional): Optional title for the plot.
+    """
+    # Convert from [-1, 1] to [0, 1] for visualization
+    image_tensor = (image_tensor + 1) / 2
+    image_unflat = image_tensor.detach().cpu()[:num_images]
+    image_grid = make_grid(image_unflat, nrow=num_images, padding=2)
+
+    plt.figure(figsize=(2 * num_images, 2))
+    if title:
+        plt.title(title, fontsize=12)
+    plt.axis('off')
+    plt.imshow(image_grid.permute(1, 2, 0).squeeze())
+    plt.show()
+
+# Define the srresnet_training function
+def train_srresnet(generator, dataloader, device, lr=1e-4, total_steps=30_000, display_step=1000, patience=5, min_improvement=0.1, warmup_steps=10_000):
+    """
+    Pretrain the generator (SRResNet) using only MSE loss, with PSNR/SSIM monitoring,
+    early stopping and learning rate decay.
 
     Args:
         generator (nn.Module): The generator model.
-        discriminator (nn.Module): The discriminator model.
-        dataloader (DataLoader): DataLoader for the training dataset.
-        device (str): Device to run the computations ('cuda' or 'cpu').
-        lr (float, optional): Learning rate for the optimizers. Default is 1e-4.
-        total_steps (int, optional): Total number of training steps. Default is 1e4.
-        display_step (int, optional): Step interval for displaying metrics. Default is 1000.
-        patience (int, optional): Number of steps without improvement in PSNR to trigger early stopping. Default is 5.
-        min_improvement (float, optional): Minimum PSNR improvement required to reset early stopping. Default is 0.1.
-        warmup_steps (int, optional): Number of steps to warm up before early stopping is considered. Default is 5000.
-
-    Returns:
-        None
+        dataloader (DataLoader): Dataloader for training data.
+        device (str): 'cuda' or 'cpu'.
+        lr (float): Initial learning rate.
+        total_steps (int): Total steps to train.
+        display_step (int): Step interval for displaying metrics.
+        patience (int): Early stopping patience.
+        min_improvement (float): Minimum PSNR improvement to reset patience.
+        warmup_steps (int): Steps before early stopping is considered.
     """
-
     generator = generator.to(device).train()
-    discriminator = discriminator.to(device).train()
-    loss_fn = Loss(device=device)
+    optimizer = torch.optim.AdamW(generator.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 0.1 if step >= total_steps // 2 else 1.0)
 
-    g_optimizer = torch.optim.AdamW(generator.parameters(), lr=lr)
-    d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=lr)
+    loss_fn = nn.MSELoss()
 
-    cur_step = 0
-    mean_g_loss = 0.0
-    mean_d_loss = 0.0
-    best_psnr = -float('inf')
+    best_psnr = -float("inf")
     patience_counter = 0
 
-    pbar = tqdm(total=int(total_steps), desc="Training Steps")
+    cur_step = 0
+    mean_loss = 0.0
+    mean_psnr = 0.0
+    mean_ssim = 0.0
+
+    pbar = tqdm(total=total_steps, desc="Pretraining SRResNet")
 
     while cur_step < total_steps:
         for hr_real, lr_real in dataloader:
@@ -470,7 +490,94 @@ def train(generator, discriminator, dataloader, device, lr=1e-4, total_steps=1e4
             hr_real = hr_real.to(device)
             lr_real = lr_real.to(device)
 
-            # Forward + backward
+            hr_fake = generator(lr_real)
+            loss = loss_fn(hr_fake, hr_real)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+            mean_loss += loss.item() / display_step
+
+            # Metrics on first image
+            psnr_value = calculate_psnr(hr_real[0], hr_fake[0])
+            ssim_value = calculate_ssim(hr_real[0], hr_fake[0], win_size=3, data_range=2)
+            mean_psnr += psnr_value / display_step
+            mean_ssim += ssim_value / display_step
+
+            # Display progress
+            if cur_step % display_step == 0 and cur_step > 0:
+                tqdm.write(f"Step {cur_step}: MSE Loss: {mean_loss:.5f}")
+                tqdm.write(f"→ PSNR: {mean_psnr:.2f} dB, SSIM: {mean_ssim:.4f}")
+                mean_loss = mean_psnr = mean_ssim = 0.0
+
+            # Early stopping after warmup
+            if cur_step >= warmup_steps:
+                if psnr_value > best_psnr + min_improvement:
+                    best_psnr = psnr_value
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                if patience_counter >= patience:
+                    tqdm.write(f"🛑 Early stopping at step {cur_step} — no improvement in PSNR.")
+                    torch.save(generator.state_dict(), "models/srgan/srresnet_pretrained.pth")
+                    print("✅ SRResNet saved before early stopping.")
+                    return
+
+            cur_step += 1
+            pbar.update(1)
+
+    pbar.close()
+    torch.save(generator.state_dict(), "models/srgan/srresnet_pretrained.pth")
+    print("✅ Pretrained SRResNet saved after full training.")
+
+# Define the training function
+def train_srgan(generator, discriminator, dataloader, device, lr=1e-4, total_steps=30_000, display_step=1000, patience=5, min_improvement=0.1, warmup_steps=10000):
+    """
+    Train SRGAN model using perceptual, adversarial and MSE loss with PSNR and SSIM monitoring and image visualization.
+
+    Args:
+        generator (nn.Module): Pretrained generator model.
+        discriminator (nn.Module): Discriminator model.
+        dataloader (DataLoader): Dataloader for training data.
+        device (str): Computation device.
+        lr (float): Learning rate.
+        total_steps (int): Total steps to train.
+        display_step (int): Interval to log and visualize.
+        patience (int): Early stopping patience.
+        min_improvement (float): Min PSNR improvement to reset patience.
+        warmup_steps (int): Steps before early stopping is considered.
+    """
+    generator = generator.to(device).train()
+    discriminator = discriminator.to(device).train()
+    loss_fn = Loss(device=device)
+
+    g_optimizer = torch.optim.AdamW(generator.parameters(), lr=lr)
+    d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=lr)
+
+    g_scheduler = torch.optim.lr_scheduler.LambdaLR(g_optimizer, lambda step: 0.1 if step >= total_steps // 2 else 1.0)
+    d_scheduler = torch.optim.lr_scheduler.LambdaLR(d_optimizer, lambda step: 0.1 if step >= total_steps // 2 else 1.0)
+
+    best_psnr = -float("inf")
+    patience_counter = 0
+
+    cur_step = 0
+    mean_g_loss = 0.0
+    mean_d_loss = 0.0
+    mean_psnr = 0.0
+    mean_ssim = 0.0
+
+    pbar = tqdm(total=total_steps, desc="Training SRGAN")
+
+    while cur_step < total_steps:
+        for hr_real, lr_real in dataloader:
+            if cur_step >= total_steps:
+                break
+
+            hr_real = hr_real.to(device)
+            lr_real = lr_real.to(device)
+
             g_loss, d_loss, hr_fake = loss_fn(generator, discriminator, hr_real, lr_real)
 
             g_optimizer.zero_grad()
@@ -481,58 +588,59 @@ def train(generator, discriminator, dataloader, device, lr=1e-4, total_steps=1e4
             d_loss.backward()
             d_optimizer.step()
 
+            g_scheduler.step()
+            d_scheduler.step()
+
             mean_g_loss += g_loss.item() / display_step
             mean_d_loss += d_loss.item() / display_step
 
-            # Métricas de validación
             psnr_value = calculate_psnr(hr_real[0], hr_fake[0])
             ssim_value = calculate_ssim(hr_real[0], hr_fake[0], win_size=3, data_range=2)
+            mean_psnr += psnr_value / display_step
+            mean_ssim += ssim_value / display_step
 
-            # Mostrar durante warmup también
-            if cur_step % display_step == 0:
-                tqdm.write(f'Step {cur_step}: G_loss: {mean_g_loss:.5f}, D_loss: {mean_d_loss:.5f}')
-                tqdm.write(f'PSNR: {psnr_value:.2f} dB, SSIM: {ssim_value:.4f}')
-                mean_g_loss = 0.0
-                mean_d_loss = 0.0
+            if cur_step % display_step == 0 and cur_step > 0:
+                tqdm.write(f"Step {cur_step}: G_loss: {mean_g_loss:.5f}, D_loss: {mean_d_loss:.5f}")
+                tqdm.write(f"→ PSNR: {mean_psnr:.2f} dB, SSIM: {mean_ssim:.4f}")
+                mean_g_loss = mean_d_loss = mean_psnr = mean_ssim = 0.0
 
-            # Early stopping
+                # Visualize: LR, SR, HR (same as original paper)
+                show_tensor_images(lr_real, title=f"Low Resolution — Step {cur_step}")
+                show_tensor_images(hr_fake.to(hr_real.dtype), title=f"Super Resolution — Step {cur_step}")
+                show_tensor_images(hr_real, title=f"High Resolution — Step {cur_step}")
+
+            # Early stopping based on PSNR
             if cur_step >= warmup_steps:
                 if psnr_value > best_psnr + min_improvement:
                     best_psnr = psnr_value
                     patience_counter = 0
                 else:
                     patience_counter += 1
-
                 if patience_counter >= patience:
                     tqdm.write(f"🛑 Early stopping at step {cur_step} due to no improvement in PSNR.")
+                    # Save models on early stop
+                    torch.save(generator.state_dict(), "models/srgan/srgenerator.pth")
+                    torch.save(discriminator.state_dict(), "models/srgan/srdiscriminator.pth")
+                    print("✅ Models saved after early stopping.")
                     return
 
             cur_step += 1
             pbar.update(1)
 
     pbar.close()
+    # Save final models after completing training
+    torch.save(generator.state_dict(), "models/srgan/srgenerator.pth")
+    torch.save(discriminator.state_dict(), "models/srgan/srdiscriminator.pth")
+    print("✅ SRGAN training completed and models saved.")
 
-# Initialize and train the SRGAN
-generator = Generator(n_res_blocks=16, n_ps_blocks=2).to(device)
-discriminator = Discriminator(n_blocks=1, base_channels=8).to(device)
+# Phase 1: Pretrain the generator (SRResNet)
+generator = Generator(n_res_blocks=16, n_ps_blocks=2)
+train_srresnet(generator, train_dataloader, device)
 
-train(
-    generator,  # Your generator model
-    discriminator,  # Your discriminator model
-    train_dataloader,  # Your dataloader for the training dataset
-    device,  # The device ('cuda' or 'cpu')
-    lr=1e-4,  # Learning rate
-    total_steps=1e4,  # Total steps to train
-    display_step=1000,  # Display metrics every 1000 steps
-    patience=5,  # Early stopping patience (number of steps without improvement in PSNR)
-    min_improvement=0.1,  # Minimum PSNR improvement required to reset early stopping
-    warmup_steps=5000  # Number of steps to warm up before early stopping is considered
-)
-
-# Save the trained models
-torch.save(generator.state_dict(), 'models/srgan/srgenerator.pth')
-torch.save(discriminator.state_dict(), 'models/srgan/srdiscriminator.pth')
-
+# Phase 2: Train the full SRGAN
+generator.load_state_dict(torch.load("srresnet_pretrained.pth"))
+discriminator = Discriminator(n_blocks=1, base_channels=64)
+train_srgan(generator, discriminator, train_dataloader, device)
 
 generator = Generator().to(device)
 generator.load_state_dict(torch.load('models/srgan/srgenerator.pth', map_location=device))
@@ -540,52 +648,62 @@ generator.eval()
 
 def evaluate(generator, test_loader, device):
     """
-    Evaluate the generator model on the test dataset.
+    Evaluate the generator model on the test dataset using PSNR and SSIM.
 
     Args:
-        generator (nn.Module): The generator model.
-        test_loader (DataLoader): DataLoader for the test dataset.
-        device (str): Device to run the computations ('cuda' or 'cpu').
+        generator (nn.Module): Generator model.
+        test_loader (DataLoader): Dataloader for the test dataset.
+        device (str): 'cuda' or 'cpu'.
 
     Returns:
-        tuple: Average PSNR and SSIM values across the test dataset.
+        tuple: Average PSNR and SSIM over the full dataset.
     """
     generator.eval()
-    avg_psnr = 0.0
-    avg_ssim = 0.0
+    total_psnr = 0.0
+    total_ssim = 0.0
+    num_images = 0
+
     with torch.no_grad():
         for hr_real, lr_real in tqdm(test_loader, desc="Evaluating"):
             hr_real = hr_real.to(device)
             lr_real = lr_real.to(device)
             hr_fake = generator(lr_real)
 
-            # Calculate PSNR and SSIM for the first image in the batch
-            psnr_value = calculate_psnr(hr_real[0], hr_fake[0])
-            ssim_value = calculate_ssim(hr_real[0], hr_fake[0], win_size=3, data_range=2)
+            batch_size = hr_real.size(0)
+            for i in range(batch_size):
+                psnr = calculate_psnr(hr_real[i], hr_fake[i])
+                ssim = calculate_ssim(hr_real[i], hr_fake[i], win_size=3, data_range=2)
+                total_psnr += psnr
+                total_ssim += ssim
+                num_images += 1
 
-            avg_psnr += psnr_value
-            avg_ssim += ssim_value
+    avg_psnr = total_psnr / num_images
+    avg_ssim = total_ssim / num_images
 
-    total = len(test_loader)
-    avg_psnr /= total
-    avg_ssim /= total
     print(f"\nEvaluation Results — PSNR: {avg_psnr:.2f} dB | SSIM: {avg_ssim:.4f}")
     return avg_psnr, avg_ssim
 
-def compare_images(generator, test_loader):
+# Evaluate on the test set
+evaluate(generator, test_dataloader, device)
+
+def visualize_samples(generator, test_loader, device):
     """
-    Compare low-resolution, super-resolution, and high-resolution images.
+    Visualize and compare low-resolution, super-resolution, and high-resolution images
+    including PSNR and SSIM metrics for each example.
 
     Args:
-        generator (nn.Module): The generator model.
-        test_loader (DataLoader): DataLoader for the test dataset.
+        generator (nn.Module): The trained generator model.
+        test_loader (DataLoader): Dataloader for the test dataset.
+        device (str): Computation device ('cuda' or 'cpu').
 
     Displays:
-        A plot comparing 5 low-resolution, super-resolution, and high-resolution images.
+        A grid with 5 images per row: Low-Res (LR), Super-Res (SR), High-Res (HR).
+        PSNR and SSIM values are shown on the Super-Res row.
     """
-
     def denormalize(tensor):
-        # Convert image from [-1, 1] to [0, 1]
+        """
+        Denormalizes a tensor from [-1, 1] to [0, 1].
+        """
         return tensor * 0.5 + 0.5
 
     generator.eval()
@@ -593,26 +711,38 @@ def compare_images(generator, test_loader):
         for hr_real, lr_real in test_loader:
             lr_real = lr_real.to(device)
             sr_fake = generator(lr_real)
+            num_images = min(5, lr_real.size(0))  # Display up to 5 images
 
-            # Display 5 low-resolution, super-resolution, and high-resolution images
-            fig, axs = plt.subplots(3, 5, figsize=(15, 9))
-            for i in range(5):
+            fig, axs = plt.subplots(3, num_images, figsize=(3 * num_images, 9))
+
+            for i in range(num_images):
+                # Convert tensors to NumPy images for visualization
                 lr_img = denormalize(lr_real[i].cpu()).permute(1, 2, 0).numpy()
                 sr_img = denormalize(sr_fake[i].cpu()).permute(1, 2, 0).numpy()
                 hr_img = denormalize(hr_real[i].cpu()).permute(1, 2, 0).numpy()
 
+                # Compute PSNR and SSIM for current image
+                psnr = calculate_psnr(hr_real[i], sr_fake[i])
+                ssim = calculate_ssim(hr_real[i], sr_fake[i], win_size=3, data_range=2)
+
+                # Plot Low-Resolution image
                 axs[0, i].imshow(np.clip(lr_img, 0, 1))
                 axs[0, i].set_title("Low Resolution")
                 axs[0, i].axis("off")
 
+                # Plot Super-Resolution image with PSNR/SSIM in title
                 axs[1, i].imshow(np.clip(sr_img, 0, 1))
-                axs[1, i].set_title("Super Resolution")
+                axs[1, i].set_title(f"Super Resolution\nPSNR: {psnr:.1f} dB\nSSIM: {ssim:.2f}")
                 axs[1, i].axis("off")
 
+                # Plot High-Resolution image
                 axs[2, i].imshow(np.clip(hr_img, 0, 1))
                 axs[2, i].set_title("High Resolution")
                 axs[2, i].axis("off")
 
             plt.tight_layout()
             plt.show()
-            break
+            break  # Show only one batch
+
+# Display example
+visualize_samples(generator, test_dataloader, device)
