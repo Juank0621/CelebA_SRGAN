@@ -28,13 +28,11 @@
 ## 🎥 Demo VIDEO
 *(Insert link to video demo here)*
 
----
 
 ## 📚 Dataset
 
 The project uses the **CelebA** dataset for training and testing. Ensure the dataset is downloaded and placed in the `./data/celeba` directory. The dataset should contain `.jpg` images.
 
----
 
 ## 🎯 Project Goal
 
@@ -43,7 +41,6 @@ This project implements **Super-Resolution Generative Adversarial Networks (SRGA
 - **Training the full SRGAN** with adversarial and perceptual loss.
 - **Evaluation and visualization** of results using PSNR and SSIM metrics.
 
----
 
 ## 🛠️ Key Components
 
@@ -61,7 +58,6 @@ This project implements **Super-Resolution Generative Adversarial Networks (SRGA
 - **Visualization**:
   - Side-by-side comparison of low-resolution, super-resolution, and high-resolution images.
 
----
 
 ## 🚀 Getting Started
 
@@ -77,8 +73,6 @@ Install the required Python packages using:
 ```bash
 pip install -r requirements.txt
 ```
-
----
 
 ## Files Overview
 
@@ -109,7 +103,7 @@ This script contains the main implementation of the SRGAN model, including:
 4. **Visualize Results:**
    The script includes a function to visualize low-resolution, super-resolution, and high-resolution images side-by-side.
 
-### `part3.ipynb`
+#### `part3.ipynb`
 This Jupyter Notebook provides an interactive environment for:
 - Running the training and evaluation steps in smaller, modular cells.
 - Visualizing intermediate results and metrics during training.
@@ -125,8 +119,6 @@ This Jupyter Notebook provides an interactive environment for:
    - Train the SRGAN model.
    - Evaluate and visualize results.
 
----
-
 ## 📸 Screenshots
 
 ### Training Progress
@@ -137,7 +129,6 @@ Monitor PSNR and SSIM metrics during training:
 Compare LR, SR, and HR images side-by-side:
 ![Visualization](images/visualization.png)
 
----
 
 ## Directory Structure
 
@@ -156,8 +147,6 @@ Final_Project/
 │   │   │   ├── *.jpg
 ```
 
----
-
 ## ⚙️ Tech Stack
 
 - **PyTorch**
@@ -165,7 +154,6 @@ Final_Project/
 - **scikit-image**
 - **tqdm**
 
----
 
 ## Acknowledgments
 
