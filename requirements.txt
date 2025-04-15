@@ -1,6 +1,12 @@
 transformers
-ultralytics
 torchsummary
 seaborn
 tqdm
 scikit-learn
+torch
+torchvision
+matplotlib
+scikit-image
+Pillow
+gradio
+streamlit
