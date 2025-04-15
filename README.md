@@ -21,118 +21,159 @@
 
 
 <p align="center">
-  <img src="images/cifar10.png" alt="Image" width="600"/>
+  <img src="images/CelebA.png" alt="Image" width="600"/>
 </p>
 
 
 ## 🎥 Demo VIDEO
 *(Insert link to video demo here)*
 
+---
 
 ## 📚 Dataset
 
-The project uses the **CIFAR-10** dataset, containing 60,000 32x32 color images across 10 distinct classes (6,000 images per class):
+The project uses the **CelebA** dataset for training and testing. Ensure the dataset is downloaded and placed in the `./data/celeba` directory. The dataset should contain `.jpg` images.
 
-- ✈️ **Airplane**: 6,000 images
-- 🚗 **Automobile**: 6,000 images
-- 🐦 **Bird**: 6,000 images
-- 🐱 **Cat**: 6,000 images
-- 🦌 **Deer**: 6,000 images
-- 🐶 **Dog**: 6,000 images
-- 🐸 **Frog**: 6,000 images
-- 🐴 **Horse**: 6,000 images
-- 🚢 **Ship**: 6,000 images
-- 🚚 **Truck**: 6,000 images
-
+---
 
 ## 🎯 Project Goal
 
-This project implements **Generative AI models** (Autoencoders, Variational Autoencoders, GANs) on **CIFAR-10**, applying them for **Anomaly Detection**.
+This project implements **Super-Resolution Generative Adversarial Networks (SRGAN)** to enhance low-resolution images to high-resolution quality. The implementation includes:
+- **Pretraining the Generator (SRResNet)** using MSE loss.
+- **Training the full SRGAN** with adversarial and perceptual loss.
+- **Evaluation and visualization** of results using PSNR and SSIM metrics.
 
-After training, a **Streamlit** web app allows users to:
-- Visualize image reconstructions
-- Generate synthetic samples
-- Detect anomalies based on reconstruction error or GAN discriminator scores
-
+---
 
 ## 🛠️ Key Components
 
-- **Dataset**: CIFAR-10
+- **Dataset**: CelebA
 - **Models**:
-  - Autoencoder
-  - Variational Autoencoder (VAE)
-  - Generative Adversarial Network (GAN)
-- **Anomaly Detection**: Based on reconstruction loss or GAN scores
-- **Web Interface**: Built with Streamlit
+  - Generator (SRResNet)
+  - Discriminator
+- **Loss Functions**:
+  - Adversarial Loss
+  - Perceptual Loss (VGG-based)
+  - Image Reconstruction Loss (MSE)
+- **Evaluation Metrics**:
+  - Peak Signal-to-Noise Ratio (PSNR)
+  - Structural Similarity Index (SSIM)
+- **Visualization**:
+  - Side-by-side comparison of low-resolution, super-resolution, and high-resolution images.
 
-
-## 🔍 CIFAR-10 Classes
-- ✈️ Airplane
-- 🚗 Automobile
-- 🐦 Bird
-- 🐱 Cat
-- 🦌 Deer
-- 🐶 Dog
-- 🐸 Frog
-- 🐴 Horse
-- 🚢 Ship
-- 🚚 Truck
-
+---
 
 ## 🚀 Getting Started
 
-To get started with the **Generative AI + Anomaly Detection on CIFAR-10** project, follow the steps below. The models were trained using **Visual Studio Code**, running on **Linux Ubuntu**, with an **NVIDIA GeForce RTX 4080 GPU**.
+To get started with the **SRGAN for Super-Resolution** project, follow the steps below. The models were trained using **Visual Studio Code**, running on **Linux Ubuntu**, with an **NVIDIA GeForce RTX 4080 GPU**.
 
 ### Prerequisites
-- **Miniforge/Mamba** (environment management)
-- **Visual Studio Code** (or other IDE)
-- **NVIDIA Drivers + CUDA**
+- **Python 3.8+**
+- **PyTorch** and **torchvision**
+- **Matplotlib**, **scikit-image**, **tqdm**, **Pillow**
+- **CUDA** (optional, for GPU acceleration)
 
+Install the required Python packages using:
+```bash
+pip install -r requirements.txt
+```
 
-## 🖥️ Features
+---
 
-- Train and visualize **Autoencoder**, **VAE**, and **GAN**
-- Upload images for:
-  - **Reconstruction** and anomaly detection
-  - **GAN image generation**
-  - **Latent space exploration** with VAE
-- Adjust **anomaly thresholds** via Streamlit interface
+## Files Overview
 
+### `part3.py`
+This script contains the main implementation of the SRGAN model, including:
+- Dataset preparation (`CelebADataset` class)
+- Model definitions (`Generator`, `Discriminator`, `ResidualBlock`)
+- Loss functions (`Loss` class)
+- Training functions (`train_srresnet`, `train_srgan`)
+- Evaluation and visualization functions (`evaluate`, `visualize_samples`)
+
+#### Usage
+1. **Pretrain the Generator (SRResNet):**
+   Run the script to pretrain the generator using MSE loss:
+   ```bash
+   python part3.py
+   ```
+   The pretrained generator will be saved as `models/srgan/srresnet_pretrained.pth`.
+
+2. **Train the Full SRGAN:**
+   After pretraining, the script will train the full SRGAN model using adversarial and perceptual loss. The trained models will be saved as:
+   - `models/srgan/srgenerator.pth`
+   - `models/srgan/srdiscriminator.pth`
+
+3. **Evaluate the Model:**
+   The script evaluates the trained generator on the test dataset and calculates PSNR and SSIM metrics.
+
+4. **Visualize Results:**
+   The script includes a function to visualize low-resolution, super-resolution, and high-resolution images side-by-side.
+
+### `part3.ipynb`
+This Jupyter Notebook provides an interactive environment for:
+- Running the training and evaluation steps in smaller, modular cells.
+- Visualizing intermediate results and metrics during training.
+- Experimenting with different hyperparameters and configurations.
+
+#### Usage
+1. Open the notebook:
+   ```bash
+   jupyter notebook part3.ipynb
+   ```
+2. Follow the cells sequentially to:
+   - Load the dataset.
+   - Train the SRGAN model.
+   - Evaluate and visualize results.
+
+---
 
 ## 📸 Screenshots
 
-### Streamlit Interface
-The Streamlit app provides a user-friendly dashboard for model interaction:
+### Training Progress
+Monitor PSNR and SSIM metrics during training:
+![Training Progress](images/training_progress.png)
 
-![Streamlit Interface](streamlit.png)
+### Visualized Results
+Compare LR, SR, and HR images side-by-side:
+![Visualization](images/visualization.png)
 
-### Reconstructions & Anomaly Scores
-Compare original vs reconstructed images and view anomaly scores:
+---
 
-![Reconstruction](reconstruction.png)
+## Directory Structure
 
-### GAN Generated Samples
-Visualize synthetic images generated by the GAN model:
+```
+Final_Project/
+├── backend/
+│   ├── part3.py
+│   ├── part3.ipynb
+│   ├── models/
+│   │   ├── srgan/
+│   │   │   ├── srresnet_pretrained.pth
+│   │   │   ├── srgenerator.pth
+│   │   │   ├── srdiscriminator.pth
+│   ├── data/
+│   │   ├── celeba/
+│   │   │   ├── *.jpg
+```
 
-![GAN Samples](gan_samples.png)
-
+---
 
 ## ⚙️ Tech Stack
 
 - **PyTorch**
-- **Streamlit**
-- **Matplotlib & Seaborn**
-- **Scikit-learn & Numpy**
+- **Matplotlib**
+- **scikit-image**
+- **tqdm**
 
+---
 
-## 📝 Notes
+## Acknowledgments
 
-- The models were trained on **CIFAR-10**, but they can be adapted for other datasets.
-- Reconstruction error and GAN discriminator outputs are used for anomaly scoring.
+This project is based on the SRGAN architecture described in the paper:
+- [Photo-Realistic Single Image Super-Resolution Using a Generative Adversarial Network](https://arxiv.org/abs/1609.04802)
 
+---
 
-## 👨‍💻 Author
+## License
 
-**Juan Carlos Garzon**  
-[LinkedIn](https://www.linkedin.com/in/juancarlosgarzon/)  
-[GitHub](https://github.com/Juank0621)
+This project is licensed under the MIT License.
