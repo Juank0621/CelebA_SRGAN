@@ -126,3 +126,6 @@ cifar10_test_images/
 # Models directory
 models/
 
+# Gradio files
+.gradio/
+
