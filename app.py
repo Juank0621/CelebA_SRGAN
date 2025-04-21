@@ -103,7 +103,7 @@ def main():
             with col2:
                 st.image(super_res, caption="Super Resolution (SRGAN)", use_container_width =True)
             with col3:
-                st.image(original, caption="Original Image (128x128)", use_container_width=True)
+                st.image(original, caption="Original Image (256x256)", use_container_width=True)
 
             st.success(f"Inference completed using `{device}`")
     else:
