@@ -4,23 +4,26 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import seaborn as sns
 from PIL import Image
-from tqdm import tqdm
+from tqdm.auto import tqdm   
+#from tqdm.rich import tqdm  # Import tqdm.rich for progress bars
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import CIFAR10
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
-from torchsummary import summary
 from torchvision.models import resnet18  # Import ResNet18
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay  # Import for confusion matrix
+from torchsummary import summary
+
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 torch.set_float32_matmul_precision('medium')
 
-# CIFAR10 images are already 32x32, so no resizing is needed. 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Define transformations for the CIFAR10 dataset
 # We normalize the images to have a mean of 0.5 and a standard deviation of 0.5 for each channel.
 transform = transforms.Compose([
     transforms.Resize((32, 32)),
@@ -30,7 +33,8 @@ transform = transforms.Compose([
 
 kwargs = {'num_workers': 8, 'pin_memory': True}  # DataLoader optimization for better performance on CUDA.
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+dummy_dataset = CIFAR10(root='./data', train=True, download=True)
+print(dummy_dataset.classes)
 
 # Custom dataset class to filter CIFAR10 images by a specific class.
 class OneClassDatasetCIFAR10(CIFAR10):
@@ -53,7 +57,6 @@ class OneClassDatasetCIFAR10(CIFAR10):
         label = 0  # Dummy label since the autoencoder does not use labels.
         return image, label
 
-# Encoder for the VAE using ResNet18 architecture
 class VAE_Encoder(nn.Module):
     def __init__(self, latent_dim=128):
         super(VAE_Encoder, self).__init__()
@@ -99,8 +102,7 @@ class VAE_Decoder(nn.Module):
         return x
 
 # Variational Autoencoder (VAE) combining the encoder and decoder. It includes the reparameterization trick
-# to sample from the latent space.
-class VAE(nn.Module):
+# to sample from the latent space.class VAE(nn.Module):
     def __init__(self, latent_dim=128):
         super(VAE, self).__init__()
         self.encoder = VAE_Encoder(latent_dim)
@@ -117,20 +119,20 @@ class VAE(nn.Module):
         x_hat = self.decoder(z)
         return x_hat, mean, logvar
 
-# Loss function for the VAE
 def vae_loss_function(x, x_hat, mean, log_var, beta=0.1):
-    reconstruction_loss = nn.functional.mse_loss(x_hat, x, reduction='mean')  # Reconstruction loss
-    kl_divergence = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())  # KL divergence
-    kl_divergence = torch.clamp(kl_divergence, min=-1e6, max=1e6)  # Clamp to avoid numerical issues
+    reconstruction_loss = nn.functional.mse_loss(x_hat, x, reduction='mean')  # Changed to 'mean'
+    kl_divergence = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
+    kl_divergence = torch.clamp(kl_divergence, min=-1e6, max=1e6)
     return reconstruction_loss + beta * kl_divergence / x.size(0)  # Normalize KL by batch size
 
 # Function to train the VAE for one epoch with tqdm
 def train_vae_epoch(vae, train_loader, optimizer):
     vae.train()
     total_loss = 0
-    # Use tqdm to display progress
+    # Use standard tqdm to display progress
     for inputs, _ in tqdm(train_loader, desc="Training VAE Epoch", leave=False):
-        inputs = inputs.to(device)  # Move inputs to device
+        # Remove the line that flattens the inputs
+        inputs = inputs.to(device)  # Keep inputs in 4D format (batch_size, channels, height, width)
         inputs = torch.clamp(inputs, 0., 1.)  # Normalize inputs to range [0, 1]
         optimizer.zero_grad()
         x_hat, mean, log_var = vae(inputs)
@@ -150,32 +152,31 @@ def train_vae_epoch(vae, train_loader, optimizer):
         total_loss += loss.item()
     return total_loss / len(train_loader)
 
-# Function to evaluate the VAE on the validation set
+# Update evaluate_vae to avoid flattening inputs
 def evaluate_vae(vae, val_loader):
     vae.eval()
     total_loss = 0
     with torch.no_grad():
         for inputs, _ in val_loader:
-            inputs = inputs.to(device)  # Move inputs to device
+            inputs = inputs.to(device)  # Keep inputs in 4D format
             x_hat, mean, log_var = vae(inputs)
             loss = vae_loss_function(inputs, x_hat, mean, log_var)
             total_loss += loss.item()
     return total_loss / len(val_loader)
 
-# Function to test the VAE for anomaly detection
+# Update test_vae to avoid flattening inputs
 def test_vae(vae, test_loader, threshold):
     vae.eval()
     anomalies = []
     with torch.no_grad():
         for inputs, _ in test_loader:
-            inputs = inputs.to(device)  # Move inputs to device
+            inputs = inputs.to(device)  # Keep inputs in 4D format
             x_hat, mean, log_var = vae(inputs)
             z = vae.reparameterize(mean, log_var)
             distances = [calculate_mahalanobis_distance(mean[i], torch.eye(mean.size(1)).to(device), z[i]) for i in range(z.size(0))]
             anomalies.extend([d > threshold for d in distances])
     return anomalies
 
-# Function to calculate Mahalanobis distance
 def calculate_mahalanobis_distance(mean, covariance, x):
     diff = x - mean
     inv_covariance = torch.linalg.inv(covariance)
@@ -184,53 +185,6 @@ def calculate_mahalanobis_distance(mean, covariance, x):
 
 # Main function to train the VAE for all classes
 def main_vae():
-    latent_dim = 256  # Latent space size
-    num_epochs = 100  # Number of epochs
-    learning_rate = 1e-3
-
-    vae = VAE(latent_dim).to(device)  # Initialize VAE
-
-    # Display the architecture of the model
-    summary(vae, input_size=(3, 32, 32))  # Input size matches CIFAR10 images
-
-    optimizer = torch.optim.AdamW(vae.parameters(), lr=learning_rate)  # Use AdamW optimizer
-
-    all_train_losses = []
-    all_val_losses = []
-
-    for real_class in range(10):
-        print(f"Training VAE for class {real_class}...")
-
-        train_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=True, download=True)
-        val_dataset = OneClassDatasetCIFAR10(root_dir='data', real_class=real_class, transform=transform, train=False, download=True)
-
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, **kwargs)
-        val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, **kwargs)
-
-        train_losses = []
-        val_losses = []
-
-        for epoch in range(num_epochs):
-            train_loss = train_vae_epoch(vae, train_loader, optimizer)
-            val_loss = evaluate_vae(vae, val_loader)
-            train_losses.append(train_loss)
-            val_losses.append(val_loss)
-            print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-
-        all_train_losses.append(train_losses)
-        all_val_losses.append(val_losses)
-
-        # Save the trained model
-        torch.save(vae.state_dict(), f'models/vae/vae_class_{real_class}_weights.pth')
-
-    return all_train_losses, all_val_losses
-
-
-# Call the main function for VAE
-all_train_losses, all_val_losses = main_vae()
-
-# Example usage of test_vae
-def main_vae_with_test():
     latent_dim = 256  # Latent space size
     num_epochs = 100  # Number of epochs
     learning_rate = 1e-3
@@ -280,8 +234,8 @@ def main_vae_with_test():
 
     return all_train_losses, all_val_losses
 
-# Call the main function with testing
-all_train_losses, all_val_losses = main_vae_with_test()
+# Call the main function for VAE
+all_train_losses, all_val_losses = main_vae()
 
 # Function to plot training and validation losses for each class in separate plots
 def plot_losses_per_class_separately(all_train_losses, all_val_losses):
@@ -299,6 +253,7 @@ def plot_losses_per_class_separately(all_train_losses, all_val_losses):
 # Generate separate plots for losses after training
 plot_losses_per_class_separately(all_train_losses, all_val_losses)
 
+# Function to visualize the reconstruction of an image by the model
 # Function to visualize the reconstruction of an image by the model
 def visualize_reconstruction(vae, dataset, class_index):
     vae.eval()
